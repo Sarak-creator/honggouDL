@@ -1,12 +1,20 @@
 // Thin proxy so the Apify token never reaches the browser.
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import express from 'express';
 import convert from 'heic-convert';
 import path from 'node:path';
 import fs from 'node:fs';
 import { Readable } from 'node:stream';
 
-const TOKEN = process.env.APIFY_TOKEN;
+dotenv.config();
+
+function getToken() {
+  try {
+    dotenv.config({ override: true });
+  } catch {}
+  return process.env.APIFY_TOKEN;
+}
+
 const BASE = 'https://api.apify.com/v2';
 const ACTORS = {
   search: 'spider_studio~hongguo-search',
@@ -17,12 +25,26 @@ const ACTORS = {
 };
 
 async function apify(p, body) {
+  const token = getToken();
   const r = await fetch(BASE + p, {
     method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!r.ok) throw new Error(`Apify ${r.status}: ${(await r.text()).slice(0, 300)}`);
+  if (!r.ok) {
+    const raw = await r.text();
+    let msg = raw;
+    try {
+      const data = JSON.parse(raw);
+      if (data?.error?.message) {
+        msg = data.error.message;
+      }
+    } catch {}
+    if (r.status === 403 && (msg.includes('Monthly usage hard limit') || msg.includes('platform-feature-disabled'))) {
+      throw new Error(`Apify 403: Monthly usage hard limit ($5.00) exceeded. Replace APIFY_TOKEN in .env with a new token from apify.com`);
+    }
+    throw new Error(`Apify ${r.status}: ${msg.slice(0, 300)}`);
+  }
   return r.json();
 }
 const sync = (actor, input) =>
@@ -37,48 +59,311 @@ const app = express();
 app.use(express.json());
 
 app.use((req, res, next) =>
-  !TOKEN && req.path.startsWith('/api')
+  !getToken() && req.path.startsWith('/api') && req.path !== '/api/translate'
     ? res.status(500).json({ error: 'APIFY_TOKEN is not set in .env' })
     : next());
 
-// Home feed: cached on disk for 24h so restarts / reloads don't burn Apify quota.
+// Google Translate proxy & in-memory cache
+const translationCache = new Map();
+
+async function translateText(text, targetLang = 'en', sourceLang = 'auto') {
+  if (!text || typeof text !== 'string') return text;
+  const clean = text.trim();
+  if (!clean) return text;
+
+  const tl = targetLang === 'zh' ? 'zh-CN' : targetLang;
+  const sl = sourceLang === 'zh' ? 'zh-CN' : sourceLang;
+  if (sl === tl) return clean;
+
+  const cacheKey = `${sl}:${tl}:${clean}`;
+  if (translationCache.has(cacheKey)) {
+    return translationCache.get(cacheKey);
+  }
+
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(tl)}&dt=t&q=${encodeURIComponent(clean)}`;
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+    if (!r.ok) throw new Error(`Google Translate upstream ${r.status}`);
+    const data = await r.json();
+    if (Array.isArray(data) && Array.isArray(data[0])) {
+      const translated = data[0].map((part) => part[0]).filter(Boolean).join('');
+      if (translationCache.size > 5000) {
+        const oldest = translationCache.keys().next().value;
+        translationCache.delete(oldest);
+      }
+      translationCache.set(cacheKey, translated);
+      return translated;
+    }
+    return clean;
+  } catch (err) {
+    console.warn(`Translation warning: ${err.message}`);
+    return clean;
+  }
+}
+
+async function translateBatchTexts(texts, targetLang = 'en', sourceLang = 'auto') {
+  if (!Array.isArray(texts) || !texts.length) return [];
+  const tl = targetLang === 'zh' ? 'zh-CN' : targetLang;
+  const sl = sourceLang === 'zh' ? 'zh-CN' : sourceLang;
+  if (sl === tl) return texts;
+
+  const results = new Array(texts.length);
+  const uncachedIndices = [];
+  const uncachedTexts = [];
+
+  texts.forEach((raw, i) => {
+    const text = String(raw || '').trim().replace(/[\r\n]+/g, ' ');
+    if (!text) {
+      results[i] = '';
+      return;
+    }
+    const key = `${sl}:${tl}:${text}`;
+    if (translationCache.has(key)) {
+      results[i] = translationCache.get(key);
+    } else {
+      uncachedIndices.push(i);
+      uncachedTexts.push(text);
+    }
+  });
+
+  if (!uncachedTexts.length) return results;
+
+  const CHUNK_SIZE = 25;
+  for (let c = 0; c < uncachedTexts.length; c += CHUNK_SIZE) {
+    const chunkTexts = uncachedTexts.slice(c, c + CHUNK_SIZE);
+    const chunkIndices = uncachedIndices.slice(c, c + CHUNK_SIZE);
+    const joined = chunkTexts.join('\n');
+    try {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(sl)}&tl=${encodeURIComponent(tl)}&dt=t&q=${encodeURIComponent(joined)}`;
+      const r = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+      if (!r.ok) throw new Error(`Google Translate upstream ${r.status}`);
+      const data = await r.json();
+      if (Array.isArray(data) && Array.isArray(data[0])) {
+        const full = data[0].map((part) => part[0]).filter(Boolean).join('');
+        const split = full.split('\n');
+        chunkIndices.forEach((origIdx, k) => {
+          const translated = (split[k] || chunkTexts[k]).trim();
+          results[origIdx] = translated;
+          const key = `${sl}:${tl}:${chunkTexts[k]}`;
+          if (translationCache.size > 5000) {
+            const first = translationCache.keys().next().value;
+            translationCache.delete(first);
+          }
+          translationCache.set(key, translated);
+        });
+      } else {
+        chunkIndices.forEach((origIdx, k) => {
+          results[origIdx] = chunkTexts[k];
+        });
+      }
+    } catch (err) {
+      console.warn('Batch translation chunk error:', err.message);
+      chunkIndices.forEach((origIdx, k) => {
+        results[origIdx] = chunkTexts[k];
+      });
+    }
+  }
+
+  return results;
+}
+
+app.post('/api/translate', wrap(async ({ body }) => {
+  const target = String(body.targetLang || body.target || 'en');
+  const source = String(body.sourceLang || body.source || 'auto');
+
+  if (Array.isArray(body.texts)) {
+    const slice = body.texts.slice(0, 100);
+    const results = await translateBatchTexts(slice, target, source);
+    return { translations: results, targetLang: target };
+  }
+
+  if (typeof body.text === 'string') {
+    const result = await translateText(body.text, target, source);
+    return { translation: result, targetLang: target };
+  }
+
+  throw new Error('Missing "text" or "texts" parameter in request body');
+}));
+
+// Home feed: cached on disk so restarts / reloads don't burn Apify quota.
 const CACHE_FILE = path.resolve('.cache/home.json');
 const readCache = () => { try { return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch { return null; } };
+
+app.get('/api/apify-status', async (req, res) => {
+  const token = getToken();
+  if (!token) {
+    return res.json({ configured: false, error: 'APIFY_TOKEN is missing' });
+  }
+  try {
+    const r = await fetch(BASE + '/users/me/limits', {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!r.ok) {
+      return res.json({ configured: true, ok: false, status: r.status, error: await r.text() });
+    }
+    const { data } = await r.json();
+    const maxUsd = data?.limits?.maxMonthlyUsageUsd ?? 5;
+    const currentUsd = data?.current?.monthlyUsageUsd ?? 0;
+    const limitExceeded = currentUsd >= maxUsd;
+    const cache = readCache();
+    res.json({
+      configured: true,
+      ok: !limitExceeded,
+      limitExceeded,
+      currentUsd: +currentUsd.toFixed(2),
+      maxUsd,
+      cycleEnd: data?.monthlyUsageCycle?.endAt,
+      cachedCount: cache?.items?.length || 0
+    });
+  } catch (err) {
+    res.json({ configured: true, ok: false, error: err.message });
+  }
+});
+
 app.get('/api/home', wrap(async ({ query }) => {
   const n = Math.min(+query.limit || 200, 1000);
+  const forceRefresh = query.refresh === 'true' || query.refresh === '1';
   const c = readCache();
-  if (c && c.requested >= n && Date.now() - c.t < 864e5) return c.items.slice(0, n);
-  const items = await sync(ACTORS.feed, { maxResults: n, includeRaw: true });
-  const good = items.filter((i) => i.success !== false);
-  if (good.length) {
-    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-    fs.writeFileSync(CACHE_FILE, JSON.stringify({ t: Date.now(), requested: n, items: good }));
-    return good;
+  // Fresh cache hit within 24h if we already have enough items
+  if (!forceRefresh && c && Array.isArray(c.items) && c.items.length >= n && Date.now() - c.t < 864e5) {
+    return c.items.slice(0, n);
   }
-  // Quota/error: fall back to stale cache if we have one.
-  return c?.items?.length ? c.items.slice(0, n) : items;
+
+  try {
+    const items = await sync(ACTORS.feed, { maxResults: n, includeRaw: true });
+    const good = items.filter((i) => i.success !== false);
+    if (good.length) {
+      // Merge with existing items so drama library grows
+      const existing = c?.items || [];
+      const map = new Map();
+      const getId = (it) => {
+        const d = it.data || it;
+        const v = d.video_data?.[0] || d;
+        return String(v.series_id || v.seriesId || d.series_id || d.seriesId || it.seriesId || '');
+      };
+      existing.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
+      good.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
+      const merged = Array.from(map.values());
+      fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+      fs.writeFileSync(CACHE_FILE, JSON.stringify({ t: Date.now(), requested: merged.length, items: merged }));
+      return merged.slice(0, n);
+    }
+    return c?.items?.length ? c.items.slice(0, n) : items;
+  } catch (err) {
+    console.warn(`Feed fetch failed (${err.message}). Falling back to cached data.`);
+    if (c?.items?.length) {
+      return c.items.slice(0, n);
+    }
+    throw err;
+  }
 }));
 
 app.post('/api/search', wrap(async ({ body }) => {
   const q = String(body.query || '').trim();
   if (!q) throw new Error('Empty query');
-  return sync(ACTORS.search, { queries: [q], maxPages: Math.min(+body.maxPages || 1, 5) });
+  const maxPages = Math.min(+body.maxPages || 3, 5);
+
+  const c = readCache();
+  const existing = c?.items || [];
+  const qLower = q.toLowerCase();
+  const getId = (it) => {
+    const d = it.data || it;
+    const v = d.video_data?.[0] || d;
+    return String(v.series_id || v.seriesId || d.series_id || d.seriesId || it.seriesId || '');
+  };
+
+  const localMatches = existing.filter((item) => {
+    const text = JSON.stringify(item).toLowerCase();
+    return text.includes(qLower);
+  });
+
+  try {
+    const results = await sync(ACTORS.search, { queries: [q], maxPages });
+    const good = results.filter((i) => i.success !== false);
+    if (good.length) {
+      // Merge with cache so library grows
+      const map = new Map();
+      existing.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
+      good.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
+      const merged = Array.from(map.values());
+      fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
+      fs.writeFileSync(CACHE_FILE, JSON.stringify({ t: c?.t || Date.now(), requested: merged.length, items: merged }));
+
+      // Combine live results + local matches for richer search results
+      const resultMap = new Map();
+      good.forEach((it) => { const id = getId(it); if (id) resultMap.set(id, it); });
+      localMatches.forEach((it) => { const id = getId(it); if (id) resultMap.set(id, it); });
+      return Array.from(resultMap.values());
+    }
+
+    if (localMatches.length) return localMatches;
+    return results;
+  } catch (err) {
+    console.warn(`Search failed on Apify for "${q}" (${err.message}). Checking cache.`);
+    if (localMatches.length) return localMatches;
+    throw err;
+  }
 }));
 
-// Series details cached 7 days on disk (free plan allows only 100 series IDs/month).
+// Series details cached on disk (free plan allows only 100 series IDs/month).
 app.get('/api/series/:id', wrap(async ({ params }) => {
   if (!isId(params.id)) throw new Error('Invalid series id');
   const f = path.resolve(`.cache/series-${params.id}.json`);
+  let cached = null;
   try {
-    const c = JSON.parse(fs.readFileSync(f, 'utf8'));
-    if (Date.now() - c.t < 7 * 864e5) return c.items;
+    cached = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const hasEpisodes = (cached.items?.[0]?.episodes?.length || 0) > 1;
+    if (hasEpisodes && Date.now() - cached.t < 7 * 864e5) return cached.items;
   } catch {}
-  const items = await sync(ACTORS.detail, { seriesIds: [params.id] });
-  if (items.some((i) => i.success !== false)) {
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, JSON.stringify({ t: Date.now(), items }));
+
+  try {
+    const items = await sync(ACTORS.detail, { seriesIds: [params.id] });
+    if (items.some((i) => i.success !== false)) {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify({ t: Date.now(), items }));
+    }
+    return items;
+  } catch (err) {
+    console.warn(`Series detail error for ${params.id} (${err.message}). Falling back to cache.`);
+    if (cached?.items) return cached.items;
+
+    // Check if we can build a fallback record from home cache
+    const home = readCache();
+    const hit = home?.items?.find((i) => {
+      const d = i.data || i;
+      const v = d.video_data?.[0] || d;
+      const id = String(v.series_id || v.seriesId || d.series_id || d.seriesId || i.seriesId || '');
+      return id === String(params.id);
+    });
+    if (hit) {
+      const d = hit.data || hit;
+      const v = d.video_data?.[0] || d;
+      return [{
+        success: true,
+        series: {
+          seriesId: params.id,
+          title: v.series_name || hit.title,
+          synopsis: v.series_intro || hit.intro,
+          coverUrl: hit.coverUrl,
+          episodeCount: hit.episodeCount || v.episode_cnt,
+          playCount: hit.playCount,
+          firstVideoId: hit.firstVideoId,
+        },
+        episodes: hit.firstVideoId ? [{ videoId: hit.firstVideoId, episodeIndex: '1' }] : [],
+        isFallback: true,
+        warning: 'Viewing cached basic info. Apify quota exceeded.',
+      }];
+    }
+    throw err;
   }
-  return items;
 }));
 
 // Downloads can take minutes, so start an async run and let the client poll.

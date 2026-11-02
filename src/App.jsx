@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import AdBanner from './AdBanner';
+import { LANGUAGES, GENRES, t, getGenre } from './i18n';
+import { translateText, translateBatch } from './translateService';
 
-const PAGE = 200;   // home loads this many up front
-const MAX = 1000;   // hard cap (server enforces too)
+const PAGE_SIZE = 24;  // Reveal 24 dramas at a time
+const MAX = 1000;       // hard cap (server enforces too)
 
 const api = async (url, body) => {
   const r = await fetch(url, body && {
@@ -67,8 +69,6 @@ function Cover({ src }) {
 }
 
 // ---- data normalisation --------------------------------------------------
-const GENRES = ['都市', '重生', '逆袭', '甜宠', '古装', '悬疑', '战神', '总裁', '穿越', '玄幻', '复仇', '家庭'];
-
 function toTags(v) {
   if (!v) return [];
   if (typeof v === 'string') return v.split(/[,，、|\s]+/).filter(Boolean);
@@ -92,15 +92,35 @@ function normalize(item) {
 
 // ---- main app ------------------------------------------------------------
 export default function App() {
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('hg_theme');
+    if (saved) return saved;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('hg_theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
+  const [lang, setLang] = useState(() => localStorage.getItem('hg_app_lang') || 'km');
+  const [titles, setTitles] = useState({});
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [hasMoreServer, setHasMoreServer] = useState(true);
   const [raw, setRaw] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState(null);
   const [mode, setMode] = useState('home'); // 'home' | 'search'
-  const [limit, setLimit] = useState(PAGE);
   const [cat, setCat] = useState('All');
+  const [apifyStatus, setApifyStatus] = useState(null);
+  const [dismissAlert, setDismissAlert] = useState(false);
 
   const toCards = (items) => {
     const seen = new Set();
@@ -112,17 +132,19 @@ export default function App() {
     if (cards.length) return '';
     const d = items.find((i) => i.success === false) || items[0] || {};
     if (d.errorCode === 'FREE_TIER_MONTHLY_QUOTA_REACHED')
-      return 'Your Apify free-plan monthly quota for this actor is used up (resets on the 1st, 00:00 UTC). Upgrade the plan or wait for the reset.';
+      return t('quotaError', lang);
     if (d.error) return `Apify actor error: ${d.error}`;
     return items.length
       ? `Got ${items.length} items but could not read series IDs. Open "Raw first result" below and send it to fix the field mapping.`
       : 'No results returned.';
   }
 
-  async function loadHome(n = limit) {
+  async function loadHome() {
     setLoading(true); setError(''); setMode('home'); setCat('All');
+    setVisibleCount(PAGE_SIZE);
+    setHasMoreServer(true);
     try {
-      const items = await api(`/api/home?limit=${n}`);
+      const items = await api('/api/home?limit=200');
       setRaw(items[0] || null);
       const cards = toCards(items);
       setResults(cards);
@@ -131,17 +153,51 @@ export default function App() {
     setLoading(false);
   }
 
-  useEffect(() => { loadHome(PAGE); }, []);
+  useEffect(() => {
+    loadHome();
+    fetch('/api/apify-status')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && d.limitExceeded) setApifyStatus(d);
+      })
+      .catch(() => { });
+  }, []);
 
-  function loadMore() {
-    const n = Math.min(limit + PAGE, MAX);
-    setLimit(n); loadHome(n);
+  async function loadMore() {
+    if (loading) return;
+
+    // 1. Reveal more cards already loaded in memory
+    if (hasMoreToReveal) {
+      setVisibleCount((prev) => prev + PAGE_SIZE);
+      return;
+    }
+
+    // 2. If all in-memory cards are shown, fetch more from the server
+    if (canLoadMoreFromServer) {
+      setLoading(true);
+      setError('');
+      try {
+        const nextLimit = results.length + PAGE_SIZE;
+        const items = await api(`/api/home?limit=${nextLimit}`);
+        const cards = toCards(items);
+        if (cards.length > results.length) {
+          setResults(cards);
+          setVisibleCount((prev) => prev + PAGE_SIZE);
+        } else {
+          setHasMoreServer(false);
+        }
+      } catch (err) {
+        setError(err.message);
+      }
+      setLoading(false);
+    }
   }
 
   async function runSearch(q) {
     setMode('search'); setCat('All'); setLoading(true); setError(''); setSelected(null);
+    setVisibleCount(PAGE_SIZE);
     try {
-      const items = await api('/api/search', { query: q });
+      const items = await api('/api/search', { query: q, maxPages: 3 });
       setRaw(items.find((i) => i.success !== false) || items[0] || null);
       const cards = toCards(items);
       setResults(cards);
@@ -150,10 +206,24 @@ export default function App() {
     setLoading(false);
   }
 
-  function search(e) {
+  async function search(e) {
     e.preventDefault();
     const q = query.trim();
-    if (!q) return loadHome(limit);
+    if (!q) return loadHome();
+
+    // If query has no Chinese characters and user is in Khmer/English, translate to Chinese for Hongguo search
+    const hasChinese = /[\u4e00-\u9fa5]/.test(q);
+    if (!hasChinese && lang !== 'zh-CN') {
+      setLoading(true);
+      try {
+        const zh = await translateText(q, 'zh-CN', 'auto');
+        if (zh && zh.trim() !== q) {
+          return runSearch(zh.trim());
+        }
+      } catch (err) {
+        console.warn('Search translation error:', err);
+      }
+    }
     runSearch(q);
   }
   function pickGenre(g) { setQuery(g); runSearch(g); }
@@ -164,36 +234,207 @@ export default function App() {
     return c;
   }, [results]);
   const tagList = Object.keys(counts).sort((x, y) => counts[y] - counts[x]).slice(0, 24);
-  const shown = cat === 'All' ? results : results.filter((r) => r.tags.includes(cat));
+
+  const filteredResults = useMemo(() => {
+    if (cat === 'All') return results;
+    return results.filter((r) => r.tags.includes(cat));
+  }, [results, cat]);
+
+  const shown = useMemo(() => {
+    return filteredResults.slice(0, visibleCount);
+  }, [filteredResults, visibleCount]);
+
+  const hasMoreToReveal = visibleCount < filteredResults.length;
+  const canLoadMoreFromServer = mode === 'home' && hasMoreServer && cat === 'All';
+  const canLoadMore = hasMoreToReveal || canLoadMoreFromServer;
+  const remainingCount = hasMoreToReveal
+    ? Math.min(filteredResults.length - visibleCount, PAGE_SIZE)
+    : PAGE_SIZE;
+
+  // Translate drama titles using Google Translate when not Chinese
+  useEffect(() => {
+    if (lang === 'zh-CN' || !shown.length) return;
+
+    const needed = shown.filter((r) => r.title && !titles[`${lang}_${r.id}`]);
+    if (!needed.length) return;
+
+    const list = needed.slice(0, 50);
+    let active = true;
+
+    translateBatch(list.map((r) => r.title), lang, 'zh-CN').then((translated) => {
+      if (!active) return;
+      setTitles((prev) => {
+        const next = { ...prev };
+        list.forEach((r, idx) => {
+          next[`${lang}_${r.id}`] = translated[idx] || r.title;
+        });
+        return next;
+      });
+    });
+
+    return () => { active = false; };
+  }, [shown, lang, titles]);
+
+  const isLimitExceeded = Boolean(
+    apifyStatus?.limitExceeded ||
+    (error && (error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage') || error.includes('platform-feature-disabled')))
+  );
+
+  const handleLangChange = (e) => {
+    const val = e.target.value;
+    setLang(val);
+    localStorage.setItem('hg_app_lang', val);
+  };
 
   return (
     <main>
-      {/* Top Banner Placement */}
+      {/* Top Banner Placement 
       <div className="ad-container" style={{ margin: '20px 0' }}>
         <AdBanner />
+      </div>*/}
+
+      <div className="top">
+        <h1>{t('appTitle', lang)}</h1>
+        <div className="top-actions">
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            aria-label="Toggle theme"
+          >
+            {theme === 'dark' ? (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                <circle cx="12" cy="12" r="5"></circle>
+                <line x1="12" y1="1" x2="12" y2="3"></line>
+                <line x1="12" y1="21" x2="12" y2="23"></line>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                <line x1="1" y1="12" x2="3" y2="12"></line>
+                <line x1="21" y1="12" x2="23" y2="12"></line>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+              </svg>
+            )}
+          </button>
+          <div className="lang-select-box">
+            <span aria-hidden="true">🌐</span>
+            <select className="lang-select" value={lang} onChange={handleLangChange}>
+              {LANGUAGES.map((l) => (
+                <option key={l.code} value={l.code}>
+                  {l.flag} {l.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
-      <h1>🍎 Hongguo Drama Video Downloader</h1>
-      <form onSubmit={search} className="bar">
-        <input value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search a title or keyword, e.g. 重生" />
-        <button disabled={loading}>{loading ? 'Loading…' : 'Search'}</button>
+
+      <form onSubmit={search} className="search-box-wrapper">
+        <div className="search-icon-left" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+        </div>
+        <input
+          className="search-input"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('searchPlaceholder', lang)}
+        />
+        {query && (
+          <button
+            type="button"
+            className="clear-btn"
+            onClick={() => setQuery('')}
+            title="Clear"
+            aria-label="Clear"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="14" height="14">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        )}
+        <button type="submit" className="search-btn" disabled={loading}>
+          {loading ? (
+            <>
+              <svg className="spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" width="16" height="16">
+                <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeLinecap="round"></circle>
+              </svg>
+              <span>{t('searching', lang)}</span>
+            </>
+          ) : (
+            <>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="15" height="15">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+              </svg>
+              <span>{t('searchBtn', lang)}</span>
+            </>
+          )}
+        </button>
       </form>
 
       <div className="chips">
-        <small>Genres (search):</small>
-        {GENRES.map((g) => <button key={g} className="chip" onClick={() => pickGenre(g)}>{g}</button>)}
+        <small>{t('genresLabel', lang)}</small>
+        {GENRES.map((g) => <button key={g} className="chip" onClick={() => pickGenre(g)}>{getGenre(g, lang)}</button>)}
       </div>
 
-      {error && <p className="err">{error}</p>}
+      {isLimitExceeded && !dismissAlert && (
+        <div className="apify-banner">
+          <div className="apify-banner-header">
+            <span className="apify-banner-icon">⚠️</span>
+            <div className="apify-banner-title">
+              <strong>{t('apifyLimitTitle', lang)}</strong>
+              <p>{t('apifyLimitNotice', lang)}</p>
+            </div>
+            <button
+              type="button"
+              className="apify-banner-dismiss"
+              onClick={() => setDismissAlert(true)}
+              title={t('dismiss', lang)}
+            >
+              ✕
+            </button>
+          </div>
+          <div className="apify-banner-steps">
+            <div className="apify-step">
+              <span className="apify-step-num">1</span>
+              <span>{t('apifyFixStep1', lang)}</span>
+            </div>
+            <div className="apify-step">
+              <span className="apify-step-num">2</span>
+              <span>{t('apifyFixStep2', lang)}</span>
+            </div>
+            <div className="apify-step">
+              <span className="apify-step-num">3</span>
+              <span>{t('apifyFixStep3', lang)}</span>
+            </div>
+          </div>
+        </div>
+      )}
 
-      <h2 className="sec">{mode === 'home' ? `All dramas (${results.length})` : `Results for “${query}” (${results.length})`}</h2>
-      {mode === 'search' && <button className="link" onClick={() => loadHome(limit)}>← Back to home</button>}
+      {error && !isLimitExceeded && <p className="err">{error}</p>}
+
+      <h2 className="sec">
+        {mode === 'home' ? `${t('allDramas', lang)} (${filteredResults.length})` : `${t('resultsFor', lang)} “${query}” (${filteredResults.length})`}
+        {isLimitExceeded && results.length > 0 && (
+          <span className="cached-badge">{t('offlineBadge', lang)}</span>
+        )}
+      </h2>
+      {mode === 'search' && <button className="link" onClick={() => loadHome()}>{t('backHome', lang)}</button>}
 
       {tagList.length > 0 && (
         <div className="chips">
-          {['All', ...tagList].map((t) => (
-            <button key={t} className={'chip' + (cat === t ? ' on' : '')} onClick={() => setCat(t)}>
-              {t}{t !== 'All' && ` ${counts[t]}`}
+          {['All', ...tagList].map((tTag) => (
+            <button key={tTag} className={'chip' + (cat === tTag ? ' on' : '')} onClick={() => { setCat(tTag); setVisibleCount(PAGE_SIZE); }}>
+              {tTag === 'All' ? t('all', lang) : tTag}{tTag !== 'All' && ` ${counts[tTag]}`}
             </button>
           ))}
         </div>
@@ -202,28 +443,36 @@ export default function App() {
       <div className="grid">
         {shown.map((r) => (
           <article key={r.id} className="card" onClick={() => setSelected(r)}>
-            <div className="thumb"><Cover src={r.cover} /></div>
-            <h3>{r.title}</h3>
-            <small>{r.episodes ? `${r.episodes} episodes` : `ID ${r.id}`}</small>
+            <div className="thumb">
+              <Cover src={r.cover} />
+              <div className="play-overlay"><span>▶</span></div>
+              {r.episodes && <span className="ep-badge">{r.episodes} {t('episodes', lang)}</span>}
+            </div>
+            <h3>{lang === 'zh-CN' ? r.title : (titles[`${lang}_${r.id}`] || r.title)}</h3>
+            <small>{r.episodes ? `${r.episodes} ${t('episodes', lang)}` : `ID ${r.id}`}</small>
           </article>
         ))}
       </div>
 
-      {mode === 'home' && results.length > 0 && limit < MAX && (
-        <div className="more"><button onClick={loadMore} disabled={loading}>{loading ? 'Loading…' : `Load more (+${PAGE})`}</button></div>
+      {results.length > 0 && canLoadMore && (
+        <div className="more">
+          <button onClick={loadMore} disabled={loading}>
+            {loading ? t('loading', lang) : t('loadMore', lang, { count: remainingCount })}
+          </button>
+        </div>
       )}
-      {loading && !results.length && <p className="muted">Loading…</p>}
+      {loading && !results.length && <p className="muted">{t('loading', lang)}</p>}
 
       {raw && (
         <details className="raw">
-          <summary>Raw first result (for debugging field mapping)</summary>
+          <summary>{t('rawFirstResult', lang)}</summary>
           <pre>{JSON.stringify(raw, null, 2)}</pre>
         </details>
       )}
 
-      {selected && <Detail series={selected} onClose={() => setSelected(null)} />}
+      {selected && <Detail series={selected} onClose={() => setSelected(null)} lang={lang} />}
 
-      <footer>Only download content you own or are authorized to download. Respect Hongguo’s terms and copyright law.</footer>
+      <footer>{t('footer', lang)}</footer>
     </main>
   );
 }
@@ -231,7 +480,7 @@ export default function App() {
 // ---- detail view: cover, episodes, play, download ------------------------
 const DONE = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'];
 
-function Detail({ series, onClose }) {
+function Detail({ series, onClose, lang }) {
   const [info, setInfo] = useState(null);
   const [ready, setReady] = useState({});     // videoId -> download item (has videoUrl)
   const [pending, setPending] = useState({}); // videoId -> true while Apify works
@@ -241,29 +490,50 @@ function Detail({ series, onClose }) {
   const [error, setError] = useState('');
   const timers = useRef([]);
 
+  // Translated title & synopsis
+  const [transTitle, setTransTitle] = useState('');
+  const [transDesc, setTransDesc] = useState('');
+
   useEffect(() => {
     api(`/api/series/${series.id}`)
       .then((r) => {
         const row = r.find((x) => x.success !== false) || r[0];
         if (!row || row.success === false)
           setError(row?.errorCode === 'FREE_TIER_MONTHLY_QUOTA_REACHED'
-            ? 'Apify free-plan monthly quota for series details is used up (resets on the 1st, 00:00 UTC).'
+            ? t('quotaError', lang)
             : row?.error || 'Could not load series details.');
         else setInfo(row);
       })
       .catch((e) => setError(e.message));
     return () => timers.current.forEach(clearInterval);
-  }, [series.id]);
+  }, [series.id, lang]);
 
   const s = info?.series || {};
-  const title = s.title || series.title;
+  const rawTitle = s.title || series.title;
+  const rawDesc = s.synopsis || series.desc || '';
   const cover = (info?.series && findCover(info.series)) || series.cover;
+
+  useEffect(() => {
+    if (lang === 'zh-CN') return;
+    let active = true;
+    if (rawTitle) {
+      translateText(rawTitle, lang, 'zh-CN').then((tr) => { if (active) setTransTitle(tr); });
+    }
+    if (rawDesc) {
+      translateText(rawDesc, lang, 'zh-CN').then((tr) => { if (active) setTransDesc(tr); });
+    }
+    return () => { active = false; };
+  }, [rawTitle, rawDesc, lang]);
+
+  const title = (lang !== 'zh-CN' && transTitle) ? transTitle : rawTitle;
+  const desc = (lang !== 'zh-CN' && transDesc) ? transDesc : rawDesc;
+
   const eps = useMemo(() => {
     const e = info?.episodes || [];
     if (e.length) return e;
     return s.firstVideoId ? [{ videoId: s.firstVideoId, episodeIndex: '1' }] : [];
-  }, [info]);
-  const label = (ep, n) => `Ep ${ep.episodeIndex ?? n + 1}`;
+  }, [info, s.firstVideoId]);
+  const label = (ep, n) => `${t('ep', lang)} ${ep.episodeIndex ?? n + 1}`;
 
   function clearPending(ids) {
     setPending((p) => { const n = { ...p }; ids.forEach((i) => delete n[i]); return n; });
@@ -303,7 +573,8 @@ function Detail({ series, onClose }) {
   function prepareMany(ids) {
     const n = ids.filter((id) => !ready[id] && !pending[id]).length;
     if (!n) return;
-    if (n > 5 && !window.confirm(`Prepare ${n} episodes? Apify charges about $${(n * 0.0035).toFixed(2)} (free plan: max 100 videos/month).`)) return;
+    const cost = (n * 0.0035).toFixed(2);
+    if (n > 5 && !window.confirm(t('confirmPrepare', lang, { count: n, cost }))) return;
     prepare(ids);
   }
 
@@ -325,11 +596,11 @@ function Detail({ series, onClose }) {
               controls autoPlay playsInline onEnded={playNext} />
             <p className="row">
               <strong>{title} · {label(playing.ep, eps.indexOf(playing.ep))}</strong>
-              <a className="btn" href={fileUrl(playing.item, playing.ep, eps.indexOf(playing.ep))}>⬇ Download</a>
-              {nextReady && <button className="mini" onClick={playNext}>Next ▶</button>}
-              <button className="mini alt" onClick={() => setPlaying(null)}>Close player</button>
+              <a className="btn" href={fileUrl(playing.item, playing.ep, eps.indexOf(playing.ep))}>{t('download', lang)}</a>
+              {nextReady && <button className="mini" onClick={playNext}>{t('nextEp', lang)}</button>}
+              <button className="mini alt" onClick={() => setPlaying(null)}>{t('closePlayer', lang)}</button>
             </p>
-            <small className="muted">{playing.item.definition} · {playing.item.codec}. If the picture is black (HEVC), download and open in VLC.</small>
+            <small className="muted">{playing.item.definition} · {playing.item.codec}. {t('vlcHint', lang)}</small>
           </div>
         )}
 
@@ -337,23 +608,55 @@ function Detail({ series, onClose }) {
           <div className="thumb big"><Cover src={cover} /></div>
           <div>
             <h2>{title}</h2>
-            <p className="muted">{s.synopsis || series.desc || ''}</p>
+            {info?.isFallback && (
+              <span className="cached-badge mini">{t('offlineBadge', lang)}</span>
+            )}
+            <p className="muted">{desc}</p>
             <p className="muted">
-              {info ? `${s.episodeCount || eps.length} episodes` : error ? '' : 'Loading details…'}
-              {s.playCount ? ` · ${s.playCount} plays` : ''}
+              {info ? `${s.episodeCount || eps.length} ${t('episodes', lang)}` : error ? '' : t('loadingDetails', lang)}
+              {s.playCount ? ` · ${s.playCount} ${t('plays', lang)}` : ''}
             </p>
           </div>
         </div>
 
         {eps.length > 0 && (
           <div className="actions">
-            <button className="primary" onClick={() => prepareMany(eps.map((e) => String(e.videoId)))} disabled={busy > 0}>Prepare all ({eps.length})</button>
-            <button className="alt" onClick={() => prepareMany([...sel])} disabled={!sel.size}>Prepare selected ({sel.size})</button>
-            <button className="alt" onClick={() => setSel(new Set(eps.slice(0, 10).map((e) => String(e.videoId))))}>Select first 10</button>
-            {busy > 0 && <small className="muted">Working on {busy}… (can take a minute)</small>}
+            <button className="primary" onClick={() => prepareMany(eps.map((e) => String(e.videoId)))} disabled={busy > 0}>
+              {t('prepareAll', lang, { count: eps.length })}
+            </button>
+            <button className="alt" onClick={() => prepareMany([...sel])} disabled={!sel.size}>
+              {t('prepareSelected', lang, { count: sel.size })}
+            </button>
+            <button className="alt" onClick={() => setSel(new Set(eps.slice(0, 10).map((e) => String(e.videoId))))}>
+              {t('selectFirst10', lang)}
+            </button>
+            {busy > 0 && <small className="muted">{t('workingOn', lang, { count: busy })}</small>}
           </div>
         )}
-        {error && <p className="err">{error}</p>}
+
+        {info?.isFallback && (
+          <div className="detail-fallback-notice">
+            <span style={{ fontSize: '18px' }}>ℹ️</span>
+            <div>
+              <strong>{t('episodesLimitedNotice', lang)}</strong>
+              <p>{t('episodesLimitedDesc', lang, { count: s.episodeCount || '?' })}</p>
+            </div>
+          </div>
+        )}
+
+        {eps.length === 0 && (
+          <p className="muted" style={{ textAlign: 'center', padding: '24px 16px', background: 'var(--card)', borderRadius: '10px', border: '1px solid var(--border)', margin: '16px 0' }}>
+            {t('noEpisodesNotice', lang)}
+          </p>
+        )}
+
+        {error && (
+          <p className="err">
+            {error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage')
+              ? `${t('apifyLimitTitle', lang)}: ${t('apifyLimitNotice', lang)}`
+              : error}
+          </p>
+        )}
 
         <div className="epgrid">
           {eps.map((ep, n) => {
@@ -370,9 +673,9 @@ function Detail({ series, onClose }) {
                     <button className="mini" onClick={() => setPlaying({ ep, item: r })}>▶</button>
                     <a className="mini btn" href={fileUrl(r, ep, n)}>⬇</a>
                   </div>
-                ) : pending[id] ? <small>Preparing…</small>
+                ) : pending[id] ? <small>{t('preparing', lang)}</small>
                   : failed[id] ? <small className="err" title={failed[id]}>Failed · <a href="#" onClick={(e) => { e.preventDefault(); prepare([id]); }}>retry</a></small>
-                  : <button className="mini alt" onClick={() => prepare([id])}>Get video</button>}
+                    : <button className="mini alt" onClick={() => prepare([id])}>{t('getVideo', lang)}</button>}
               </div>
             );
           })}
