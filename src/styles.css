@@ -155,35 +155,56 @@ main {
     gap: 10px;
 }
 
-.install-app-btn {
+/* Flag Language Switcher */
+.lang-flags {
+    display: inline-flex;
+    align-items: center;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 3px;
+    gap: 3px;
+    box-shadow: var(--shadow-sm);
+}
+
+.lang-flag-btn {
+    width: 32px;
+    height: 32px;
     display: inline-flex !important;
     align-items: center !important;
-    gap: 7px !important;
-    padding: 8px 14px !important;
-    font-size: 13.5px !important;
-    font-weight: 600 !important;
-    color: #ffffff !important;
-    background: linear-gradient(135deg, #f43f5e 0%, #e11d48 50%, #be123c 100%) !important;
-    border: none !important;
-    border-radius: 12px !important;
+    justify-content: center !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    border-radius: 9px !important;
+    font-size: 19px !important;
+    line-height: 1 !important;
     cursor: pointer !important;
-    box-shadow: 0 4px 14px rgba(225, 29, 72, 0.35) !important;
+    padding: 0 !important;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-    flex-shrink: 0;
+    opacity: 0.6;
+    filter: grayscale(20%);
 }
 
-.install-app-btn:hover {
-    transform: translateY(-1.5px) !important;
-    box-shadow: 0 6px 18px rgba(225, 29, 72, 0.45) !important;
-    filter: brightness(1.08);
+.lang-flag-btn:hover {
+    opacity: 0.95;
+    filter: grayscale(0%);
+    background: rgba(140, 140, 160, 0.12) !important;
+    transform: scale(1.08);
 }
 
-.install-app-btn:active {
-    transform: translateY(0) !important;
+.lang-flag-btn.active {
+    opacity: 1;
+    filter: grayscale(0%);
+    background: var(--bg) !important;
+    border-color: var(--border) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12) !important;
+    transform: scale(1.08);
 }
 
-.install-app-btn svg {
-    flex-shrink: 0;
+[data-theme="dark"] .lang-flag-btn.active {
+    background: rgba(255, 255, 255, 0.12) !important;
+    border-color: rgba(255, 255, 255, 0.2) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35) !important;
 }
 
 .theme-toggle-btn {
@@ -208,38 +229,6 @@ main {
     box-shadow: var(--shadow-md) !important;
     transform: translateY(-1px) !important;
     color: var(--acc) !important;
-}
-
-.lang-select-box {
-    display: flex;
-    align-items: center;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 4px 10px;
-    box-shadow: var(--shadow-sm);
-    transition: all 0.2s ease;
-}
-
-.lang-select-box:hover {
-    border-color: var(--mut);
-    box-shadow: var(--shadow-md);
-}
-
-.lang-select {
-    padding: 6px 8px;
-    background: transparent;
-    color: var(--fg);
-    font-size: 14px;
-    font-weight: 500;
-    border: none;
-    cursor: pointer;
-    outline: none;
-}
-
-.lang-select option {
-    background: var(--card);
-    color: var(--fg);
 }
 
 /* Modern Search Bar */
@@ -967,10 +956,20 @@ pre {
         font-size: 18px;
     }
 
-    .install-app-btn {
-        padding: 6px 11px !important;
-        font-size: 12px !important;
-        border-radius: 10px !important;
+    .lang-flags {
+        padding: 2px;
+        gap: 2px;
+    }
+
+    .lang-flag-btn {
+        width: 30px;
+        height: 30px;
+        font-size: 17px !important;
+    }
+
+    .theme-toggle-btn {
+        width: 34px;
+        height: 34px;
     }
 
     .head {
