@@ -4,6 +4,7 @@ import express from 'express';
 import convert from 'heic-convert';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { Readable } from 'node:stream';
 
 dotenv.config();
@@ -58,10 +59,20 @@ const wrap = (fn) => async (req, res) => {
 const app = express();
 app.use(express.json());
 
-app.use((req, res, next) =>
-  !getToken() && req.path.startsWith('/api') && req.path !== '/api/translate'
-    ? res.status(500).json({ error: 'APIFY_TOKEN is not set in .env' })
-    : next());
+app.use((req, res, next) => {
+  const allowWithoutToken = [
+    '/api/translate',
+    '/api/apify-status',
+    '/api/img',
+    '/api/imgcheck',
+    '/api/file',
+    '/api/home',
+  ];
+  if (!getToken() && req.path.startsWith('/api') && !allowWithoutToken.some((p) => req.path.startsWith(p))) {
+    return res.status(500).json({ error: 'APIFY_TOKEN is not set. Please add APIFY_TOKEN in .env or Vercel Environment Variables.' });
+  }
+  next();
+});
 
 // Google Translate proxy & in-memory cache
 const translationCache = new Map();
@@ -193,9 +204,31 @@ app.post('/api/translate', wrap(async ({ body }) => {
   throw new Error('Missing "text" or "texts" parameter in request body');
 }));
 
-// Home feed: cached on disk so restarts / reloads don't burn Apify quota.
-const CACHE_FILE = path.resolve('.cache/home.json');
-const readCache = () => { try { return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch { return null; } };
+// Cache directory: on Vercel use writable /tmp, locally use .cache
+const CACHE_DIR = process.env.VERCEL ? path.join(os.tmpdir(), 'hongguo-cache') : path.resolve('.cache');
+const BUNDLED_CACHE_FILE = path.resolve('.cache/home.json');
+const CACHE_FILE = path.join(CACHE_DIR, 'home.json');
+
+const readCache = () => {
+  try {
+    if (fs.existsSync(CACHE_FILE)) {
+      return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
+    }
+    if (fs.existsSync(BUNDLED_CACHE_FILE)) {
+      return JSON.parse(fs.readFileSync(BUNDLED_CACHE_FILE, 'utf8'));
+    }
+  } catch {}
+  return null;
+};
+
+const saveCache = (targetPath, data) => {
+  try {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, typeof data === 'string' ? data : JSON.stringify(data));
+  } catch (err) {
+    console.warn(`Cache save skipped (${err.message})`);
+  }
+};
 
 app.get('/api/apify-status', async (req, res) => {
   const token = getToken();
@@ -237,6 +270,12 @@ app.get('/api/home', wrap(async ({ query }) => {
     return c.items.slice(0, n);
   }
 
+  const token = getToken();
+  if (!token) {
+    if (c?.items?.length) return c.items.slice(0, n);
+    throw new Error('APIFY_TOKEN is not set. Please add APIFY_TOKEN in .env or Vercel Environment Variables.');
+  }
+
   try {
     const items = await sync(ACTORS.feed, { maxResults: n, includeRaw: true });
     const good = items.filter((i) => i.success !== false);
@@ -252,8 +291,7 @@ app.get('/api/home', wrap(async ({ query }) => {
       existing.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
       good.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
       const merged = Array.from(map.values());
-      fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-      fs.writeFileSync(CACHE_FILE, JSON.stringify({ t: Date.now(), requested: merged.length, items: merged }));
+      saveCache(CACHE_FILE, { t: Date.now(), requested: merged.length, items: merged });
       return merged.slice(0, n);
     }
     return c?.items?.length ? c.items.slice(0, n) : items;
@@ -285,6 +323,12 @@ app.post('/api/search', wrap(async ({ body }) => {
     return text.includes(qLower);
   });
 
+  const token = getToken();
+  if (!token) {
+    if (localMatches.length) return localMatches;
+    throw new Error('APIFY_TOKEN is not set. Please add APIFY_TOKEN in .env or Vercel Environment Variables.');
+  }
+
   try {
     const results = await sync(ACTORS.search, { queries: [q], maxPages });
     const good = results.filter((i) => i.success !== false);
@@ -294,8 +338,7 @@ app.post('/api/search', wrap(async ({ body }) => {
       existing.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
       good.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
       const merged = Array.from(map.values());
-      fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-      fs.writeFileSync(CACHE_FILE, JSON.stringify({ t: c?.t || Date.now(), requested: merged.length, items: merged }));
+      saveCache(CACHE_FILE, { t: c?.t || Date.now(), requested: merged.length, items: merged });
 
       // Combine live results + local matches for richer search results
       const resultMap = new Map();
@@ -316,19 +359,54 @@ app.post('/api/search', wrap(async ({ body }) => {
 // Series details cached on disk (free plan allows only 100 series IDs/month).
 app.get('/api/series/:id', wrap(async ({ params }) => {
   if (!isId(params.id)) throw new Error('Invalid series id');
-  const f = path.resolve(`.cache/series-${params.id}.json`);
+  const tmpSeriesFile = path.join(CACHE_DIR, `series-${params.id}.json`);
+  const bundledSeriesFile = path.resolve(`.cache/series-${params.id}.json`);
   let cached = null;
   try {
-    cached = JSON.parse(fs.readFileSync(f, 'utf8'));
-    const hasEpisodes = (cached.items?.[0]?.episodes?.length || 0) > 1;
+    if (fs.existsSync(tmpSeriesFile)) {
+      cached = JSON.parse(fs.readFileSync(tmpSeriesFile, 'utf8'));
+    } else if (fs.existsSync(bundledSeriesFile)) {
+      cached = JSON.parse(fs.readFileSync(bundledSeriesFile, 'utf8'));
+    }
+    const hasEpisodes = (cached?.items?.[0]?.episodes?.length || 0) > 1;
     if (hasEpisodes && Date.now() - cached.t < 7 * 864e5) return cached.items;
   } catch {}
+
+  const token = getToken();
+  if (!token) {
+    if (cached?.items) return cached.items;
+    const home = readCache();
+    const hit = home?.items?.find((i) => {
+      const d = i.data || i;
+      const v = d.video_data?.[0] || d;
+      const id = String(v.series_id || v.seriesId || d.series_id || d.seriesId || i.seriesId || '');
+      return id === String(params.id);
+    });
+    if (hit) {
+      const d = hit.data || hit;
+      const v = d.video_data?.[0] || d;
+      return [{
+        success: true,
+        series: {
+          seriesId: params.id,
+          title: v.series_name || hit.title,
+          synopsis: v.series_intro || hit.intro,
+          coverUrl: hit.coverUrl,
+          episodeCount: hit.episodeCount || v.episode_cnt,
+          playCount: hit.playCount,
+          firstVideoId: hit.firstVideoId,
+        },
+        episodes: hit.firstVideoId ? [{ videoId: hit.firstVideoId, episodeIndex: '1' }] : [],
+        isFallback: true,
+      }];
+    }
+    throw new Error('APIFY_TOKEN is not configured in Vercel Environment Variables');
+  }
 
   try {
     const items = await sync(ACTORS.detail, { seriesIds: [params.id] });
     if (items.some((i) => i.success !== false)) {
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      fs.writeFileSync(f, JSON.stringify({ t: Date.now(), items }));
+      saveCache(tmpSeriesFile, { t: Date.now(), items });
     }
     return items;
   } catch (err) {
@@ -464,4 +542,14 @@ app.get('/api/img', async (req, res) => {
 app.use(express.static('dist'));
 app.get('*', (_, res) => res.sendFile(path.resolve('dist/index.html')));
 
-app.listen(process.env.PORT || 3001, () => console.log('API on :' + (process.env.PORT || 3001)));
+const isMain = process.argv[1] && (
+  process.argv[1].endsWith('server.js') ||
+  process.argv[1].endsWith('server')
+);
+
+if (isMain && !process.env.VERCEL) {
+  const port = process.env.PORT || 3001;
+  app.listen(port, () => console.log('API on :' + port));
+}
+
+export default app;

@@ -12,8 +12,17 @@ const api = async (url, body) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const j = await r.json();
-  if (!r.ok) throw new Error(j.error || 'Request failed');
+  const text = await r.text();
+  let j;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    if (!r.ok) {
+      throw new Error(`Server ${r.status}: ${text.slice(0, 150)}`);
+    }
+    throw new Error('Invalid JSON response from server');
+  }
+  if (!r.ok) throw new Error(j.error || `Request failed with status ${r.status}`);
   return j;
 };
 
