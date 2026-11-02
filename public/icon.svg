@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c1917" />
+      <stop offset="50%" stop-color="#0c0a09" />
+      <stop offset="100%" stop-color="#000000" />
+    </linearGradient>
+
+    <!-- Border Ring Glow -->
+    <linearGradient id="ringGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f43f5e" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#be123c" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#e11d48" stop-opacity="0.7" />
+    </linearGradient>
+
+    <!-- Ambient Red Radial Glow -->
+    <radialGradient id="ambientGlow" cx="50%" cy="52%" r="48%">
+      <stop offset="0%" stop-color="#f43f5e" stop-opacity="0.35" />
+      <stop offset="60%" stop-color="#e11d48" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Hongguo Apple Gradient -->
+    <linearGradient id="appleGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#fb7185" />
+      <stop offset="25%" stop-color="#f43f5e" />
+      <stop offset="65%" stop-color="#e11d48" />
+      <stop offset="100%" stop-color="#9f1239" />
+    </linearGradient>
+
+    <!-- Leaf Gradient -->
+    <linearGradient id="leafGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+
+    <!-- Gold Sparkle Gradient -->
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fef08a" />
+      <stop offset="100%" stop-color="#eab308" />
+    </linearGradient>
+
+    <!-- Drop Shadow for Apple -->
+    <filter id="shadowApple" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#e11d48" flood-opacity="0.45" />
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000000" flood-opacity="0.6" />
+    </filter>
+
+    <!-- Drop Shadow for Play Button -->
+    <filter id="shadowPlay" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.4" />
+    </filter>
+
+    <!-- Apple Top Shine -->
+    <linearGradient id="shineGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.4" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Squircle Base (iOS/Android App Icon Standard) -->
+  <rect x="8" y="8" width="496" height="496" rx="116" fill="url(#bgGrad)" stroke="url(#ringGlow)" stroke-width="6" />
+
+  <!-- Ambient Glow -->
+  <circle cx="256" cy="275" r="210" fill="url(#ambientGlow)" />
+
+  <!-- Apple Stem -->
+  <path d="M256 145 C256 105 240 75 220 58 C228 58 248 85 248 145 Z" fill="#78350f" />
+
+  <!-- Apple Leaf -->
+  <path d="M256 125 C295 85 350 95 365 130 C325 155 270 148 256 125 Z" fill="url(#leafGrad)" />
+  <path d="M256 125 C300 120 340 128 365 130" stroke="#a7f3d0" stroke-width="2.5" stroke-linecap="round" fill="none" opacity="0.6" />
+
+  <!-- Apple Body (Hongguo Red Fruit) with Filter -->
+  <g filter="url(#shadowApple)">
+    <path d="M256 182 
+             C285 142 385 135 410 230 
+             C430 305 385 405 320 440 
+             C282 460 264 445 256 445 
+             C248 445 230 460 192 440 
+             C127 405 82 305 102 230 
+             C127 135 227 142 256 182 Z"
+          fill="url(#appleGrad)" />
+  </g>
+
+  <!-- Apple Highlight Shine -->
+  <path d="M140 215 
+           C130 260 155 330 190 365
+           C170 330 155 275 162 230
+           C168 190 210 170 235 172
+           C200 168 150 180 140 215 Z"
+        fill="url(#shineGrad)" />
+
+  <!-- Play Button (Centered Inside Apple) -->
+  <polygon points="230,225 330,285 230,345"
+           fill="#ffffff"
+           filter="url(#shadowPlay)" />
+
+  <!-- Golden 4-point Sparkle Star -->
+  <g transform="translate(375, 155)">
+    <polygon points="0,-24 5,-6 24,0 5,6 0,24 -5,6 -24,0 -5,-6" fill="url(#goldGrad)" />
+    <circle cx="0" cy="0" r="3" fill="#ffffff" />
+  </g>
+
+  <g transform="translate(130, 360) scale(0.6)">
+    <polygon points="0,-20 4,-5 20,0 4,5 0,20 -4,5 -20,0 -4,-5" fill="url(#goldGrad)" opacity="0.8" />
+  </g>
+</svg>

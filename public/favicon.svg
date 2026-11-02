@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c1917" />
+      <stop offset="50%" stop-color="#0c0a09" />
+      <stop offset="100%" stop-color="#000000" />
+    </linearGradient>
+    <linearGradient id="ringGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f43f5e" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#be123c" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#e11d48" stop-opacity="0.7" />
+    </linearGradient>
+    <linearGradient id="appleGrad" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" stop-color="#fb7185" />
+      <stop offset="25%" stop-color="#f43f5e" />
+      <stop offset="65%" stop-color="#e11d48" />
+      <stop offset="100%" stop-color="#9f1239" />
+    </linearGradient>
+    <linearGradient id="leafGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="496" height="496" rx="116" fill="url(#bgGrad)" stroke="url(#ringGlow)" stroke-width="6" />
+  <path d="M256 145 C256 105 240 75 220 58 C228 58 248 85 248 145 Z" fill="#78350f" />
+  <path d="M256 125 C295 85 350 95 365 130 C325 155 270 148 256 125 Z" fill="url(#leafGrad)" />
+  <path d="M256 182 C285 142 385 135 410 230 C430 305 385 405 320 440 C282 460 264 445 256 445 C248 445 230 460 192 440 C127 405 82 305 102 230 C127 135 227 142 256 182 Z" fill="url(#appleGrad)" />
+  <polygon points="230,225 330,285 230,345" fill="#ffffff" />
+</svg>

@@ -131,6 +131,47 @@ export default function App() {
   const [apifyStatus, setApifyStatus] = useState(null);
   const [dismissAlert, setDismissAlert] = useState(false);
 
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [isStandalone, setIsStandalone] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+      window.navigator.standalone === true
+    );
+  });
+
+  useEffect(() => {
+    const handleBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    const handleAppInstalled = () => {
+      setDeferredPrompt(null);
+      setIsStandalone(true);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const choice = await deferredPrompt.userChoice;
+      if (choice && choice.outcome === 'accepted') {
+        setIsStandalone(true);
+      }
+      setDeferredPrompt(null);
+    } else {
+      alert(t('installGuide', lang));
+    }
+  };
+
   const toCards = (items) => {
     const seen = new Set();
     return items.filter((i) => i.success !== false).map(normalize)
@@ -303,8 +344,33 @@ export default function App() {
       </div>*/}
 
       <div className="top">
-        <h1>{t('appTitle', lang)}</h1>
+        <div className="app-brand" onClick={() => loadHome()} style={{ cursor: 'pointer' }} title={t('appTitle', lang)}>
+          <img
+            src="/icon.svg"
+            alt="Hongguo App Logo"
+            className="app-logo"
+            width="42"
+            height="42"
+          />
+          <h1>{t('appTitle', lang)}</h1>
+        </div>
         <div className="top-actions">
+          {!isStandalone && (
+            <button
+              type="button"
+              className="install-app-btn"
+              onClick={handleInstallClick}
+              title={t('installApp', lang)}
+              aria-label={t('installApp', lang)}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>{t('installApp', lang)}</span>
+            </button>
+          )}
           <button
             type="button"
             className="theme-toggle-btn"

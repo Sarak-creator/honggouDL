@@ -25,7 +25,7 @@ export const GENRE_MAP = {
 
 export const TRANSLATIONS = {
   km: {
-    appTitle: '🍎 កម្មវិធីទាញយកវីដេអូរឿងភាគខ្លី Hongguo',
+    appTitle: 'កម្មវិធីទាញយកវីដេអូរឿងភាគខ្លី Hongguo',
     searchPlaceholder: 'ស្វែងរកចំណងជើង ឬពាក្យគន្លឹះ ឧ. កើតជាថ្មី, 重生',
     searchBtn: 'ស្វែងរក',
     searching: 'កំពុងស្វែងរក…',
@@ -67,9 +67,11 @@ export const TRANSLATIONS = {
     episodesLimitedNotice: 'បង្ហាញតែភាគសាកល្បង (ដោយសារកូតា Apify ត្រូវបានប្រើអស់)',
     episodesLimitedDesc: 'រឿងនេះមានសរុប {count} ភាគ។ ដើម្បីទាញយកភាគទាំងអស់ (ភាគ ២ ដល់ {count}) សូមប្តូរ APIFY_TOKEN ថ្មីក្នុងឯកសារ .env។',
     noEpisodesNotice: 'មិនទាន់មានទិន្នន័យភាគសម្រាប់រឿងនេះនៅក្នុង Cache ទេ។ សូមប្តូរ APIFY_TOKEN ក្នុង .env ដើម្បីទាញយកពី Hongguo។',
+    installApp: 'ដំឡើង App',
+    installGuide: 'ដើម្បីដំឡើង Shortcut App លើទូរស័ព្ទ៖\n• Android / Chrome: ចុច Menu (⋮) រួចជ្រើសរើស "Install app" ឬ "Add to Home screen"\n• iPhone / Safari: ចុចប៊ូតុង Share (⎋) រួចជ្រើសរើស "Add to Home Screen (+)"',
   },
   en: {
-    appTitle: '🍎 Hongguo Drama Video Downloader',
+    appTitle: 'Hongguo Drama Video Downloader',
     searchPlaceholder: 'Search a title or keyword, e.g. 重生 or Rebirth',
     searchBtn: 'Search',
     searching: 'Searching…',
@@ -111,9 +113,11 @@ export const TRANSLATIONS = {
     episodesLimitedNotice: 'Preview episode only (Apify free limit reached)',
     episodesLimitedDesc: 'This drama has {count} episodes in total. To load the full list (Ep 2 to {count}), update APIFY_TOKEN in .env with a new free token.',
     noEpisodesNotice: 'No episode data cached for this drama. Update APIFY_TOKEN in .env to fetch episodes from Hongguo.',
+    installApp: 'Install App',
+    installGuide: 'To install on mobile / desktop:\n• Android / Chrome: Tap Menu (⋮) and select "Install app" or "Add to Home screen"\n• iPhone / Safari: Tap Share (⎋) and select "Add to Home Screen (+)"',
   },
   'zh-CN': {
-    appTitle: '🍎 红果短剧视频下载器',
+    appTitle: '红果短剧视频下载器',
     searchPlaceholder: '搜索短剧标题或关键词，例如 重生、总裁',
     searchBtn: '搜索',
     searching: '搜索中…',
@@ -155,6 +159,8 @@ export const TRANSLATIONS = {
     episodesLimitedNotice: '仅显示试看集（Apify 额度已用尽）',
     episodesLimitedDesc: '本剧共有 {count} 集。如需获取完整分集列表（第2集至第{count}集），请在 .env 中更换新的免费 APIFY_TOKEN。',
     noEpisodesNotice: '该剧在本地缓存中暂无分集数据。请在 .env 中更换 APIFY_TOKEN 以从红果获取。',
+    installApp: '安装应用',
+    installGuide: '安装应用快捷方式：\n• Android / Chrome：点击菜单 (⋮) 选择“安装应用”或“添加到主屏幕”\n• iPhone / Safari：点击分享按钮 (⎋) 选择“添加到主屏幕 (+)”',
   }
 };
 
