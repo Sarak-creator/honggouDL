@@ -447,21 +447,56 @@ app.get('/api/series/:id', wrap(async ({ params }) => {
 // Downloads can take minutes, so start an async run and let the client poll.
 app.post('/api/download', wrap(async ({ body }) => {
   if (Array.isArray(body.videoIds)) {
-    const ids = [...new Set(body.videoIds.map(String))].filter(isId).slice(0, 100);
+    const ids = [...new Set(body.videoIds.map(String))].filter(isId);
     if (!ids.length) throw new Error('No valid episode ids');
-    const { data } = await apify(`/acts/${ACTORS.dlVideo}/runs`, { videoIds: ids });
-    return { runId: data.id };
+    if (ids.length <= 100) {
+      const { data } = await apify(`/acts/${ACTORS.dlVideo}/runs`, { videoIds: ids });
+      return { runId: data.id, runIds: [data.id] };
+    }
+    // If more than 100 episodes, chunk into batches of 80 to respect Apify's max 100 input limit
+    const chunkSize = 80;
+    const runIds = [];
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      const { data } = await apify(`/acts/${ACTORS.dlVideo}/runs`, { videoIds: chunk });
+      runIds.push(data.id);
+    }
+    return { runId: runIds.join(','), runIds };
   }
   if (!isId(body.seriesId)) throw new Error('Invalid series id');
   const { data } = await apify(`/acts/${ACTORS.download}/runs`, { seriesIds: [body.seriesId] });
-  return { runId: data.id };
+  return { runId: data.id, runIds: [data.id] };
 }));
 
 app.get('/api/download/:runId', wrap(async ({ params }) => {
-  const { data: run } = await apify(`/actor-runs/${encodeURIComponent(params.runId)}`);
-  const done = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(run.status);
-  const items = await apify(`/datasets/${run.defaultDatasetId}/items?clean=true`).catch(() => []);
-  return { status: run.status, done, items };
+  const ids = params.runId.split(',').filter(Boolean);
+  if (ids.length <= 1) {
+    const runId = ids[0] || params.runId;
+    const { data: run } = await apify(`/actor-runs/${encodeURIComponent(runId)}`);
+    const done = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(run.status);
+    const items = await apify(`/datasets/${run.defaultDatasetId}/items?clean=true`).catch(() => []);
+    return { status: run.status, done, items };
+  }
+
+  // Multiple runs aggregation
+  const results = await Promise.all(
+    ids.map(async (id) => {
+      try {
+        const { data: run } = await apify(`/actor-runs/${encodeURIComponent(id)}`);
+        const done = ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(run.status);
+        const items = await apify(`/datasets/${run.defaultDatasetId}/items?clean=true`).catch(() => []);
+        return { status: run.status, done, items };
+      } catch {
+        return { status: 'FAILED', done: true, items: [] };
+      }
+    })
+  );
+
+  const done = results.every((r) => r.done);
+  const items = results.flatMap((r) => r.items);
+  const hasRunning = results.some((r) => r.status === 'RUNNING');
+  const status = done ? (results.some((r) => r.status === 'SUCCEEDED') ? 'SUCCEEDED' : 'FAILED') : (hasRunning ? 'RUNNING' : 'READY');
+  return { status, done, items };
 }));
 
 // Diagnostic: reports exactly what the image server returns for a cover URL.
