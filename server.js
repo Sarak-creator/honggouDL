@@ -492,6 +492,8 @@ app.get('/api/file', async (req, res) => {
     res.set({
       'Content-Type': 'video/mp4',
       'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}.mp4`,
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': '*',
     });
     const len = r.headers.get('content-length');
     if (len) res.set('Content-Length', len);

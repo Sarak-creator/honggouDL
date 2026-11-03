@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
+import JSZip from 'jszip';
 import AdBanner from './AdBanner';
 import { LANGUAGES, GENRES, t, getGenre } from './i18n';
 import { translateText, translateBatch } from './translateService';
@@ -522,6 +523,11 @@ function Detail({ series, onClose, lang }) {
   const [statusMessage, setStatusMessage] = useState('');
   const [copiedLinks, setCopiedLinks] = useState(false);
 
+  // ZIP packaging states
+  const [isZipping, setIsZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState({ current: 0, total: 0, percent: 0 });
+  const [showZipModal, setShowZipModal] = useState(false);
+
   const cancelDownloadRef = useRef(false);
   const readyRef = useRef(ready);
   readyRef.current = ready;
@@ -738,6 +744,116 @@ function Detail({ series, onClose, lang }) {
     });
   };
 
+  const zipParts = useMemo(() => {
+    const list = [];
+    const size = 20;
+    for (let i = 0; i < eps.length; i += size) {
+      const partNum = Math.floor(i / size) + 1;
+      const chunk = eps.slice(i, i + size);
+      const from = i + 1;
+      const to = Math.min(i + size, eps.length);
+      list.push({
+        part: partNum,
+        name: `Part ${partNum} (${from}-${to})`,
+        from,
+        to,
+        chunk,
+      });
+    }
+    return list;
+  }, [eps]);
+
+  const startZipDownload = async (targetList, customPart = '') => {
+    if (!targetList || !targetList.length || isDownloading || isZipping) return;
+
+    cancelDownloadRef.current = false;
+    setIsZipping(true);
+    setError('');
+    setShowZipModal(false);
+    setZipProgress({ current: 0, total: targetList.length, percent: 0 });
+
+    // 1. Trigger preparation for unready episodes
+    const unreadyIds = targetList
+      .map((e) => String(e.videoId))
+      .filter((id) => !readyRef.current[id]?.videoUrl && !pendingRef.current[id]);
+
+    if (unreadyIds.length > 0) {
+      prepare(unreadyIds);
+    }
+
+    try {
+      const zip = new JSZip();
+      const folderName = customPart ? `${title} ${customPart}` : title;
+      const cleanFolderName = folderName.replace(/[\\/:*?"<>|]/g, '_').trim();
+      const folder = zip.folder(cleanFolderName) || zip;
+
+      for (let i = 0; i < targetList.length; i++) {
+        if (cancelDownloadRef.current) break;
+
+        const ep = targetList[i];
+        const id = String(ep.videoId);
+        const epIndex = eps.indexOf(ep);
+        const epLabel = label(ep, epIndex >= 0 ? epIndex : i);
+
+        setZipProgress({
+          current: i + 1,
+          total: targetList.length,
+          percent: Math.round(((i) / targetList.length) * 100),
+        });
+        setStatusMessage(t('zipFetching', lang, { ep: epLabel, current: i + 1, total: targetList.length }));
+
+        let item = readyRef.current[id];
+        if (!item || !item.videoUrl) {
+          item = await waitForReady(id);
+        }
+
+        if (cancelDownloadRef.current) break;
+
+        if (item && item.videoUrl) {
+          const downloadUrl = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
+          const res = await fetch(downloadUrl);
+          if (!res.ok) throw new Error(`Failed to fetch ${epLabel} (${res.status})`);
+          const blob = await res.blob();
+          const cleanEpName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
+          folder.file(`${cleanEpName}.mp4`, blob);
+          setDownloadedSet((prev) => new Set([...prev, id]));
+        } else {
+          console.warn(`Could not add ${epLabel} to zip`);
+        }
+      }
+
+      if (!cancelDownloadRef.current) {
+        setStatusMessage(t('zipCompressing', lang));
+        setZipProgress((p) => ({ ...p, percent: 99 }));
+        const zipBlob = await zip.generateAsync(
+          { type: 'blob', compression: 'STORE' },
+          (meta) => {
+            setZipProgress((p) => ({ ...p, percent: Math.round(meta.percent) }));
+          }
+        );
+
+        const zipUrl = URL.createObjectURL(zipBlob);
+        const fileName = `${cleanFolderName}.zip`;
+        triggerSingleFileDownload(zipUrl, fileName);
+        setTimeout(() => URL.revokeObjectURL(zipUrl), 60000);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsZipping(false);
+      setStatusMessage('');
+      setZipProgress({ current: 0, total: 0, percent: 0 });
+    }
+  };
+
+  const handleZipClick = (targetList) => {
+    if (targetList.length > 20) {
+      setShowZipModal(true);
+    } else {
+      startZipDownload(targetList);
+    }
+  };
+
   return (
     <div className="overlay" onClick={onClose}>
       <section className="modal" onClick={(e) => e.stopPropagation()}>
@@ -779,7 +895,7 @@ function Detail({ series, onClose, lang }) {
                 type="button"
                 className="btn-download-all"
                 onClick={() => startOneClickDownload(eps)}
-                disabled={isDownloading}
+                disabled={isDownloading || isZipping}
                 title={t('oneClickDownloadAll', lang, { count: eps.length })}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
@@ -790,19 +906,46 @@ function Detail({ series, onClose, lang }) {
                 <span>{t('oneClickDownloadAll', lang, { count: eps.length })}</span>
               </button>
 
+              <button
+                type="button"
+                className="btn-download-zip"
+                onClick={() => handleZipClick(eps)}
+                disabled={isDownloading || isZipping}
+                title={t('downloadZip', lang)}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+                  <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+                  <line x1="12" y1="22.08" x2="12" y2="12"></line>
+                </svg>
+                <span>{t('downloadZip', lang)}</span>
+              </button>
+
               {sel.size > 0 && (
-                <button
-                  type="button"
-                  className="btn-download-selected"
-                  onClick={() => startOneClickDownload(eps.filter((e) => sel.has(String(e.videoId))))}
-                  disabled={isDownloading}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
-                    <polyline points="7 10 12 15 17 10"></polyline>
-                    <line x1="12" y1="15" x2="12" y2="3"></line>
-                  </svg>
-                  <span>{t('downloadSelected', lang, { count: sel.size })}</span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="btn-download-selected"
+                    onClick={() => startOneClickDownload(eps.filter((e) => sel.has(String(e.videoId))))}
+                    disabled={isDownloading || isZipping}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    <span>{t('downloadSelected', lang, { count: sel.size })}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn-download-zip-sel"
+                    onClick={() => startZipDownload(eps.filter((e) => sel.has(String(e.videoId))))}
+                    disabled={isDownloading || isZipping}
+                    title={t('downloadZipSelected', lang, { count: sel.size })}
+                  >
+                    <span>{t('downloadZipSelected', lang, { count: sel.size })}</span>
+                  </button>
+                </>
               )}
             </div>
 
@@ -894,6 +1037,88 @@ function Detail({ series, onClose, lang }) {
             <div className="download-progress-footer">
               <span>{Math.round(((downloadIndex + 1) / Math.max(downloadQueue.length, 1)) * 100)}% ({downloadIndex + 1}/{downloadQueue.length})</span>
               <span className="download-hint">{t('browserDownloadTip', lang)}</span>
+            </div>
+          </div>
+        )}
+
+        {isZipping && (
+          <div className="download-progress-card zip-card">
+            <div className="download-progress-header">
+              <div className="download-progress-title">
+                <span className="download-pulse-icon">📦</span>
+                <div>
+                  <strong>
+                    {t('downloadZip', lang)} ({zipProgress.current}/{zipProgress.total})
+                  </strong>
+                  <span className="download-current-desc">
+                    {statusMessage || t('zipCompressing', lang)}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn-stop-download"
+                onClick={cancelDownload}
+                title={t('stopDownload', lang)}
+              >
+                ✕ {t('stopDownload', lang)}
+              </button>
+            </div>
+
+            <div className="download-bar-track">
+              <div
+                className="download-bar-fill zip-fill"
+                style={{ width: `${zipProgress.percent}%` }}
+              ></div>
+            </div>
+
+            <div className="download-progress-footer">
+              <span>{zipProgress.percent}% ({zipProgress.current}/{zipProgress.total})</span>
+              <span className="download-hint">{t('zipHint', lang)}</span>
+            </div>
+          </div>
+        )}
+
+        {showZipModal && (
+          <div className="zip-modal-overlay" onClick={() => setShowZipModal(false)}>
+            <div className="zip-modal-content" onClick={(e) => e.stopPropagation()}>
+              <div className="zip-modal-header">
+                <h3>{t('zipPartsTitle', lang)}</h3>
+                <button type="button" className="zip-modal-close" onClick={() => setShowZipModal(false)}>✕</button>
+              </div>
+              <p className="muted" style={{ fontSize: '13px', margin: '4px 0 16px' }}>
+                {t('zipHint', lang)}
+              </p>
+              <div className="zip-parts-list">
+                <button
+                  type="button"
+                  className="zip-part-btn primary-part"
+                  onClick={() => startZipDownload(eps)}
+                >
+                  <span className="zip-part-icon">📦</span>
+                  <div className="zip-part-text">
+                    <strong>{t('zipPartAll', lang, { count: eps.length })}</strong>
+                    <small>{t('downloadTip', lang)}</small>
+                  </div>
+                  <span className="zip-part-arrow">⬇</span>
+                </button>
+
+                {zipParts.map((p) => (
+                  <button
+                    key={p.part}
+                    type="button"
+                    className="zip-part-btn"
+                    onClick={() => startZipDownload(p.chunk, `Part ${p.part}`)}
+                  >
+                    <span className="zip-part-icon">📁</span>
+                    <div className="zip-part-text">
+                      <strong>{t('zipPartItem', lang, { part: p.part, from: p.from, to: p.to })}</strong>
+                      <small>{p.chunk.length} {t('episodes', lang)}</small>
+                    </div>
+                    <span className="zip-part-arrow">⬇</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
