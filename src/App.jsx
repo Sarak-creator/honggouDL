@@ -514,6 +514,22 @@ function Detail({ series, onClose, lang }) {
   const [error, setError] = useState('');
   const timers = useRef([]);
 
+  // One-click batch download states
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadQueue, setDownloadQueue] = useState([]);
+  const [downloadIndex, setDownloadIndex] = useState(0);
+  const [downloadedSet, setDownloadedSet] = useState(() => new Set());
+  const [statusMessage, setStatusMessage] = useState('');
+  const [copiedLinks, setCopiedLinks] = useState(false);
+
+  const cancelDownloadRef = useRef(false);
+  const readyRef = useRef(ready);
+  readyRef.current = ready;
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  const failedRef = useRef(failed);
+  failedRef.current = failed;
+
   // Translated title & synopsis
   const [transTitle, setTransTitle] = useState('');
   const [transDesc, setTransDesc] = useState('');
@@ -529,7 +545,10 @@ function Detail({ series, onClose, lang }) {
         else setInfo(row);
       })
       .catch((e) => setError(e.message));
-    return () => timers.current.forEach(clearInterval);
+    return () => {
+      cancelDownloadRef.current = true;
+      timers.current.forEach(clearInterval);
+    };
   }, [series.id, lang]);
 
   const s = info?.series || {};
@@ -564,34 +583,39 @@ function Detail({ series, onClose, lang }) {
   }
 
   async function prepare(list) {
-    const ids = list.map(String).filter((id) => !ready[id] && !pending[id]);
+    const ids = list.map(String).filter((id) => !readyRef.current[id]?.videoUrl && !pendingRef.current[id]);
     if (!ids.length) return;
     setError('');
     setFailed((f) => { const n = { ...f }; ids.forEach((i) => delete n[i]); return n; });
     setPending((p) => ({ ...p, ...Object.fromEntries(ids.map((i) => [i, true])) }));
-    try {
-      const { runId } = await api('/api/download', { videoIds: ids });
-      const t = setInterval(async () => {
-        try {
-          const st = await api(`/api/download/${runId}`);
-          const ok = {}, bad = {};
-          st.items.forEach((i) => {
-            if (i.success && i.videoUrl) ok[String(i.videoId)] = i;
-            else if (i.videoId) bad[String(i.videoId)] = i.error || 'failed';
-          });
-          setReady((r) => ({ ...r, ...ok }));
-          if (st.done || DONE.includes(st.status)) {
-            clearInterval(t);
-            setFailed((f) => ({ ...f, ...bad }));
-            clearPending(ids);
-            const quota = st.items.find((i) => i.errorCode);
-            if (quota) setError(quota.error || `Apify: ${quota.errorCode}`);
-            else if (!Object.keys(ok).length && !Object.keys(bad).length) setError(`Run ${st.status} with no videos.`);
-          }
-        } catch (e) { clearInterval(t); setError(e.message); clearPending(ids); }
-      }, 3000);
-      timers.current.push(t);
-    } catch (e) { setError(e.message); clearPending(ids); }
+
+    const chunkSize = 80;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      try {
+        const { runId } = await api('/api/download', { videoIds: chunk });
+        const t = setInterval(async () => {
+          try {
+            const st = await api(`/api/download/${runId}`);
+            const ok = {}, bad = {};
+            st.items.forEach((item) => {
+              if (item.success && item.videoUrl) ok[String(item.videoId)] = item;
+              else if (item.videoId) bad[String(item.videoId)] = item.error || 'failed';
+            });
+            setReady((r) => ({ ...r, ...ok }));
+            if (st.done || DONE.includes(st.status)) {
+              clearInterval(t);
+              setFailed((f) => ({ ...f, ...bad }));
+              clearPending(chunk);
+              const quota = st.items.find((item) => item.errorCode);
+              if (quota) setError(quota.error || `Apify: ${quota.errorCode}`);
+              else if (!Object.keys(ok).length && !Object.keys(bad).length) setError(`Run ${st.status} with no videos.`);
+            }
+          } catch (e) { clearInterval(t); setError(e.message); clearPending(chunk); }
+        }, 3000);
+        timers.current.push(t);
+      } catch (e) { setError(e.message); clearPending(chunk); }
+    }
   }
 
   function prepareMany(ids) {
@@ -606,8 +630,113 @@ function Detail({ series, onClose, lang }) {
   const fileUrl = (item, ep, n) =>
     `/api/file?u=${encodeURIComponent(item.videoUrl)}&name=${encodeURIComponent(`${title} ${label(ep, n)}`)}`;
   const busy = Object.keys(pending).length;
+  const readyCount = eps.filter((e) => ready[String(e.videoId)]?.videoUrl).length;
   const nextReady = playing && eps.slice(eps.indexOf(playing.ep) + 1).find((e) => ready[String(e.videoId)]);
   const playNext = () => nextReady && setPlaying({ ep: nextReady, item: ready[String(nextReady.videoId)] });
+
+  const triggerSingleFileDownload = (url, filename) => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.setAttribute('download', filename);
+    a.setAttribute('target', '_blank');
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      try {
+        document.body.removeChild(a);
+      } catch {}
+    }, 2500);
+  };
+
+  const waitForReady = async (id) => {
+    const startTime = Date.now();
+    while (!cancelDownloadRef.current && Date.now() - startTime < 180000) {
+      if (readyRef.current[id]?.videoUrl) {
+        return readyRef.current[id];
+      }
+      if (failedRef.current[id]) {
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return readyRef.current[id] || null;
+  };
+
+  const startOneClickDownload = async (targetList) => {
+    if (!targetList || !targetList.length || isDownloading) return;
+
+    cancelDownloadRef.current = false;
+    setIsDownloading(true);
+    setDownloadQueue(targetList);
+    setDownloadIndex(0);
+    setError('');
+
+    // Trigger preparation for unready episodes
+    const unreadyIds = targetList
+      .map((e) => String(e.videoId))
+      .filter((id) => !readyRef.current[id]?.videoUrl && !pendingRef.current[id]);
+
+    if (unreadyIds.length > 0) {
+      prepare(unreadyIds);
+    }
+
+    // Process sequential downloads
+    for (let i = 0; i < targetList.length; i++) {
+      if (cancelDownloadRef.current) break;
+
+      setDownloadIndex(i);
+      const ep = targetList[i];
+      const id = String(ep.videoId);
+      const epIndex = eps.indexOf(ep);
+      const epLabel = label(ep, epIndex >= 0 ? epIndex : i);
+
+      let item = readyRef.current[id];
+      if (!item || !item.videoUrl) {
+        setStatusMessage(t('waitingForEp', lang, { ep: epLabel }));
+        item = await waitForReady(id);
+      }
+
+      if (cancelDownloadRef.current) break;
+
+      if (item && item.videoUrl) {
+        setStatusMessage(t('downloadingEp', lang, { ep: epLabel }));
+        const fileName = `${title} ${epLabel}`;
+        const url = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
+        triggerSingleFileDownload(url, `${fileName}.mp4`);
+        setDownloadedSet((prev) => new Set([...prev, id]));
+        await new Promise((r) => setTimeout(r, 1200));
+      } else {
+        console.warn(`Could not download ${epLabel}`);
+      }
+    }
+
+    setIsDownloading(false);
+    setStatusMessage('');
+  };
+
+  const cancelDownload = () => {
+    cancelDownloadRef.current = true;
+    setIsDownloading(false);
+    setStatusMessage('');
+  };
+
+  const copyAllLinks = () => {
+    const readyEps = eps.filter((ep) => ready[String(ep.videoId)]?.videoUrl);
+    if (!readyEps.length) return;
+
+    const domain = window.location.origin;
+    const lines = readyEps.map((ep, idx) => {
+      const id = String(ep.videoId);
+      const item = ready[id];
+      return `${domain}${fileUrl(item, ep, idx)}`;
+    });
+
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      setCopiedLinks(true);
+      setTimeout(() => setCopiedLinks(false), 3000);
+    });
+  };
 
   return (
     <div className="overlay" onClick={onClose}>
@@ -644,17 +773,128 @@ function Detail({ series, onClose, lang }) {
         </div>
 
         {eps.length > 0 && (
-          <div className="actions">
-            <button className="primary" onClick={() => prepareMany(eps.map((e) => String(e.videoId)))} disabled={busy > 0}>
-              {t('prepareAll', lang, { count: eps.length })}
-            </button>
-            <button className="alt" onClick={() => prepareMany([...sel])} disabled={!sel.size}>
-              {t('prepareSelected', lang, { count: sel.size })}
-            </button>
-            <button className="alt" onClick={() => setSel(new Set(eps.slice(0, 10).map((e) => String(e.videoId))))}>
-              {t('selectFirst10', lang)}
-            </button>
-            {busy > 0 && <small className="muted">{t('workingOn', lang, { count: busy })}</small>}
+          <div className="detail-actions-panel">
+            <div className="primary-actions-row">
+              <button
+                type="button"
+                className="btn-download-all"
+                onClick={() => startOneClickDownload(eps)}
+                disabled={isDownloading}
+                title={t('oneClickDownloadAll', lang, { count: eps.length })}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>{t('oneClickDownloadAll', lang, { count: eps.length })}</span>
+              </button>
+
+              {sel.size > 0 && (
+                <button
+                  type="button"
+                  className="btn-download-selected"
+                  onClick={() => startOneClickDownload(eps.filter((e) => sel.has(String(e.videoId))))}
+                  disabled={isDownloading}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="16" height="16">
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                  </svg>
+                  <span>{t('downloadSelected', lang, { count: sel.size })}</span>
+                </button>
+              )}
+            </div>
+
+            <div className="secondary-actions-row">
+              <div className="selection-buttons">
+                <button
+                  type="button"
+                  className="mini-chip"
+                  onClick={() => setSel(new Set(eps.map((e) => String(e.videoId))))}
+                >
+                  {t('selectAll', lang)}
+                </button>
+                <button
+                  type="button"
+                  className="mini-chip"
+                  onClick={() => setSel(new Set(eps.slice(0, 10).map((e) => String(e.videoId))))}
+                >
+                  {t('selectFirst10', lang)}
+                </button>
+                {sel.size > 0 && (
+                  <button
+                    type="button"
+                    className="mini-chip"
+                    onClick={() => setSel(new Set())}
+                  >
+                    {t('deselectAll', lang)}
+                  </button>
+                )}
+              </div>
+
+              <div className="export-buttons">
+                {readyCount > 0 && (
+                  <button
+                    type="button"
+                    className="mini-chip outline"
+                    onClick={copyAllLinks}
+                    title="Copy direct video URLs"
+                  >
+                    {copiedLinks ? t('linksCopied', lang, { count: readyCount }) : t('exportLinks', lang, { count: readyCount })}
+                  </button>
+                )}
+                {busy > 0 && (
+                  <small className="muted busy-label">
+                    <span className="spinner-dot"></span>
+                    {t('workingOn', lang, { count: busy })}
+                  </small>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isDownloading && (
+          <div className="download-progress-card">
+            <div className="download-progress-header">
+              <div className="download-progress-title">
+                <span className="download-pulse-icon">📥</span>
+                <div>
+                  <strong>
+                    {t('downloadingProgress', lang, {
+                      current: Math.min(downloadIndex + 1, downloadQueue.length),
+                      total: downloadQueue.length
+                    })}
+                  </strong>
+                  <span className="download-current-desc">
+                    {statusMessage || label(downloadQueue[downloadIndex], downloadIndex)}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn-stop-download"
+                onClick={cancelDownload}
+                title={t('stopDownload', lang)}
+              >
+                ✕ {t('stopDownload', lang)}
+              </button>
+            </div>
+
+            <div className="download-bar-track">
+              <div
+                className="download-bar-fill"
+                style={{
+                  width: `${Math.round(((downloadIndex + 1) / Math.max(downloadQueue.length, 1)) * 100)}%`
+                }}
+              ></div>
+            </div>
+
+            <div className="download-progress-footer">
+              <span>{Math.round(((downloadIndex + 1) / Math.max(downloadQueue.length, 1)) * 100)}% ({downloadIndex + 1}/{downloadQueue.length})</span>
+              <span className="download-hint">{t('browserDownloadTip', lang)}</span>
+            </div>
           </div>
         )}
 
@@ -686,20 +926,35 @@ function Detail({ series, onClose, lang }) {
           {eps.map((ep, n) => {
             const id = String(ep.videoId);
             const r = ready[id];
+            const isDownloaded = downloadedSet.has(id);
+            const isCurrentlyDownloading = isDownloading && downloadQueue[downloadIndex]?.videoId === ep.videoId;
+
             return (
-              <div key={id} className={'ep' + (sel.has(id) ? ' sel' : '')}>
+              <div key={id} className={'ep' + (sel.has(id) ? ' sel' : '') + (isDownloaded ? ' downloaded' : '')}>
                 <div className="thumb" onClick={() => (r ? setPlaying({ ep, item: r }) : toggle(id))}>
                   <Cover src={findCover(ep) || cover} />
+                  {isDownloaded && <span className="downloaded-badge">✓</span>}
                 </div>
                 <span>{label(ep, n)}{ep.duration ? ` · ${Math.round(ep.duration)}s` : ''}</span>
-                {r ? (
+                {isCurrentlyDownloading ? (
+                  <span className="ep-status-pill downloading">📥 {t('downloading', lang) || 'Downloading…'}</span>
+                ) : isDownloaded ? (
+                  <div className="row">
+                    <span className="ep-status-pill done">✅ {t('saved', lang)}</span>
+                    <button className="mini" onClick={() => setPlaying({ ep, item: r })}>▶</button>
+                  </div>
+                ) : r ? (
                   <div className="row">
                     <button className="mini" onClick={() => setPlaying({ ep, item: r })}>▶</button>
-                    <a className="mini btn" href={fileUrl(r, ep, n)}>⬇</a>
+                    <a className="mini btn" href={fileUrl(r, ep, n)} title={t('download', lang)}>⬇</a>
                   </div>
-                ) : pending[id] ? <small>{t('preparing', lang)}</small>
-                  : failed[id] ? <small className="err" title={failed[id]}>Failed · <a href="#" onClick={(e) => { e.preventDefault(); prepare([id]); }}>retry</a></small>
-                    : <button className="mini alt" onClick={() => prepare([id])}>{t('getVideo', lang)}</button>}
+                ) : pending[id] ? (
+                  <small className="ep-status-pill pending">⏳ {t('preparing', lang)}</small>
+                ) : failed[id] ? (
+                  <small className="err" title={failed[id]}>Failed · <a href="#" onClick={(e) => { e.preventDefault(); prepare([id]); }}>retry</a></small>
+                ) : (
+                  <button className="mini alt" onClick={() => prepare([id])}>{t('getVideo', lang)}</button>
+                )}
               </div>
             );
           })}

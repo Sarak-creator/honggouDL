@@ -800,6 +800,238 @@ button:disabled {
     box-shadow: var(--shadow-md);
 }
 
+/* One-Click Download Actions Panel */
+.detail-actions-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin: 18px 0;
+    padding: 16px;
+    background: var(--card);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-sm);
+}
+
+.primary-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+}
+
+.btn-download-all {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    padding: 12px 22px !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+    background: linear-gradient(135deg, #f43f5e 0%, #e11d48 50%, #be123c 100%) !important;
+    border: none !important;
+    border-radius: 12px !important;
+    cursor: pointer !important;
+    box-shadow: 0 4px 16px rgba(225, 29, 72, 0.4) !important;
+    transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    flex: 1 1 240px;
+}
+
+.btn-download-all:hover:not(:disabled) {
+    transform: translateY(-1.5px) !important;
+    box-shadow: 0 6px 22px rgba(225, 29, 72, 0.55) !important;
+    filter: brightness(1.08);
+}
+
+.btn-download-all:active:not(:disabled) {
+    transform: translateY(0) !important;
+}
+
+.btn-download-all:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    filter: grayscale(40%);
+}
+
+.btn-download-selected {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 12px 18px !important;
+    font-size: 14px !important;
+    font-weight: 600 !important;
+    color: #ffffff !important;
+    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
+    border: none !important;
+    border-radius: 12px !important;
+    cursor: pointer !important;
+    box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35) !important;
+    transition: all 0.2s ease !important;
+}
+
+.btn-download-selected:hover:not(:disabled) {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 18px rgba(2, 132, 199, 0.45) !important;
+}
+
+.secondary-actions-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.selection-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.export-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.mini-chip {
+    padding: 6px 12px !important;
+    font-size: 12.5px !important;
+    font-weight: 500 !important;
+    border-radius: 8px !important;
+    background: var(--bg) !important;
+    color: var(--fg) !important;
+    border: 1px solid var(--border) !important;
+    cursor: pointer !important;
+    transition: all 0.18s ease !important;
+}
+
+.mini-chip:hover {
+    background: var(--card) !important;
+    border-color: var(--mut) !important;
+    color: var(--acc) !important;
+}
+
+.mini-chip.outline {
+    border-color: rgba(225, 29, 72, 0.3) !important;
+    color: var(--acc) !important;
+}
+
+.mini-chip.outline:hover {
+    background: rgba(225, 29, 72, 0.08) !important;
+}
+
+.busy-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+}
+
+.spinner-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--acc);
+    display: inline-block;
+    animation: pulse 1s infinite alternate;
+}
+
+/* Download Progress Card */
+.download-progress-card {
+    background: linear-gradient(135deg, rgba(225, 29, 72, 0.08) 0%, rgba(244, 63, 94, 0.04) 100%);
+    border: 1.5px solid rgba(225, 29, 72, 0.35);
+    border-radius: 14px;
+    padding: 16px;
+    margin: 14px 0 18px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+}
+
+[data-theme="dark"] .download-progress-card {
+    background: linear-gradient(135deg, rgba(225, 29, 72, 0.16) 0%, rgba(244, 63, 94, 0.08) 100%);
+    border-color: rgba(225, 29, 72, 0.45);
+}
+
+.download-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.download-progress-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.download-pulse-icon {
+    font-size: 24px;
+    line-height: 1;
+    animation: bounce 1.4s infinite;
+}
+
+.download-current-desc {
+    display: block;
+    font-size: 12.5px;
+    color: var(--mut);
+    margin-top: 2px;
+}
+
+.btn-stop-download {
+    padding: 6px 14px !important;
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    background: rgba(239, 68, 68, 0.15) !important;
+    color: #ef4444 !important;
+    border: 1px solid rgba(239, 68, 68, 0.3) !important;
+    cursor: pointer !important;
+    transition: all 0.2s ease !important;
+    flex-shrink: 0;
+}
+
+.btn-stop-download:hover {
+    background: #ef4444 !important;
+    color: #ffffff !important;
+}
+
+.download-bar-track {
+    width: 100%;
+    height: 8px;
+    background: rgba(140, 140, 160, 0.2);
+    border-radius: 9999px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.download-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #f43f5e, #e11d48);
+    border-radius: 9999px;
+    transition: width 0.3s ease;
+}
+
+.download-progress-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--fg);
+    opacity: 0.85;
+}
+
+.download-hint {
+    color: var(--mut);
+}
+
 /* Episode Tiles Grid */
 .epgrid {
     display: grid;
@@ -837,6 +1069,70 @@ button:disabled {
     overflow: hidden;
     position: relative;
     cursor: pointer;
+}
+
+/* Episode Status Badges & Downloaded State */
+.downloaded-badge {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 22px;
+    height: 22px;
+    background: #10b981;
+    color: #fff;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    z-index: 2;
+}
+
+.ep.downloaded {
+    border-color: rgba(16, 185, 129, 0.45);
+    background: rgba(16, 185, 129, 0.05);
+}
+
+.ep-status-pill {
+    display: inline-block;
+    padding: 3px 6px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+}
+
+.ep-status-pill.downloading {
+    background: rgba(225, 29, 72, 0.12);
+    color: var(--acc);
+    border: 1px solid rgba(225, 29, 72, 0.3);
+    animation: pulse 1s infinite alternate;
+}
+
+.ep-status-pill.done {
+    background: rgba(16, 185, 129, 0.12);
+    color: #059669;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+[data-theme="dark"] .ep-status-pill.done {
+    color: #34d399;
+}
+
+.ep-status-pill.pending {
+    color: var(--mut);
+}
+
+@keyframes bounce {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+}
+
+@keyframes pulse {
+    0% { opacity: 0.6; }
+    100% { opacity: 1; }
 }
 
 .ep .thumb img {
@@ -983,6 +1279,37 @@ pre {
     .grid {
         grid-template-columns: repeat(2, 1fr);
         gap: 12px;
+    }
+
+    .btn-download-all {
+        width: 100%;
+        font-size: 14px !important;
+        padding: 11px 16px !important;
+    }
+
+    .btn-download-selected {
+        width: 100%;
+        justify-content: center !important;
+    }
+
+    .secondary-actions-row {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    .selection-buttons {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .download-progress-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .btn-stop-download {
+        align-self: flex-end;
     }
 }
 
