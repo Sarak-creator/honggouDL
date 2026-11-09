@@ -168,7 +168,7 @@ export default function App() {
     fetch('/api/apify-status')
       .then((r) => r.json())
       .then((d) => {
-        if (d && d.limitExceeded) setApifyStatus(d);
+        if (d) setApifyStatus(d);
       })
       .catch(() => { });
   }, []);
@@ -286,8 +286,10 @@ export default function App() {
   }, [shown, lang, titles]);
 
   const isLimitExceeded = Boolean(
-    apifyStatus?.limitExceeded ||
-    (error && (error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage') || error.includes('platform-feature-disabled')))
+    !apifyStatus?.standalone && (
+      apifyStatus?.limitExceeded ||
+      (error && (error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage') || error.includes('platform-feature-disabled')))
+    )
   );
 
   const handleLangChange = (codeOrEvent) => {
@@ -449,7 +451,11 @@ export default function App() {
 
       <h2 className="sec">
         {mode === 'home' ? `${t('allDramas', lang)} (${filteredResults.length})` : `${t('resultsFor', lang)} “${query}” (${filteredResults.length})`}
-        {isLimitExceeded && results.length > 0 && (
+        {apifyStatus?.standalone ? (
+          <span className="cached-badge" style={{ backgroundColor: '#059669', color: '#fff', marginLeft: '8px' }}>
+            ⚡ Standalone Database
+          </span>
+        ) : isLimitExceeded && results.length > 0 && (
           <span className="cached-badge">{t('offlineBadge', lang)}</span>
         )}
       </h2>
@@ -599,7 +605,17 @@ function Detail({ series, onClose, lang }) {
     for (let i = 0; i < ids.length; i += chunkSize) {
       const chunk = ids.slice(i, i + chunkSize);
       try {
-        const { runId } = await api('/api/download', { videoIds: chunk });
+        const res = await api('/api/download', { videoIds: chunk });
+        const runId = res?.runId || '';
+        if (res?.standalone || runId.startsWith('standalone_')) {
+          clearPending(chunk);
+          setError(
+            lang === 'km'
+              ? '⚡ វេបសាយកំពុងដំណើរការលើ Standalone Database Mode (មិនពឹងលើ Apify)។ ដើម្បីទាញយកវីដេអូ MP4 ផ្ទាល់ សូមប្រើប្រាស់កម្មវិធី Hongguo Downloader (PC) ឬបន្ថែម APIFY_TOKEN ក្នុង .env។'
+              : '⚡ Standalone Database Mode (no Apify required). To download raw MP4 files directly, use Hongguo Downloader for PC or configure APIFY_TOKEN in .env.'
+          );
+          return;
+        }
         const t = setInterval(async () => {
           try {
             const st = await api(`/api/download/${runId}`);

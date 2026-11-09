@@ -59,18 +59,8 @@ const wrap = (fn) => async (req, res) => {
 const app = express();
 app.use(express.json());
 
+// In Standalone Mode, requests are served without token restriction.
 app.use((req, res, next) => {
-  const allowWithoutToken = [
-    '/api/translate',
-    '/api/apify-status',
-    '/api/img',
-    '/api/imgcheck',
-    '/api/file',
-    '/api/home',
-  ];
-  if (!getToken() && req.path.startsWith('/api') && !allowWithoutToken.some((p) => req.path.startsWith(p))) {
-    return res.status(500).json({ error: 'APIFY_TOKEN is not set. Please add APIFY_TOKEN in .env or Vercel Environment Variables.' });
-  }
   next();
 });
 
@@ -230,34 +220,81 @@ const saveCache = (targetPath, data) => {
   }
 };
 
+// In-memory indexing of all pre-cached series details (.cache/series-*.json)
+const seriesCacheMap = new Map();
+function loadAllSeriesCache() {
+  try {
+    const cacheDirs = [path.resolve('.cache'), CACHE_DIR];
+    for (const dir of cacheDirs) {
+      if (fs.existsSync(dir)) {
+        const files = fs.readdirSync(dir).filter((f) => f.startsWith('series-') && f.endsWith('.json'));
+        for (const f of files) {
+          const id = f.replace(/^series-/, '').replace(/\.json$/, '');
+          try {
+            const content = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+            const items = content?.items || (Array.isArray(content) ? content : [content]);
+            if (items && items.length) {
+              seriesCacheMap.set(id, items);
+            }
+          } catch {}
+        }
+      }
+    }
+    console.log(`[Standalone Engine] Loaded ${seriesCacheMap.size} pre-cached series details.`);
+  } catch (err) {
+    console.warn('[Standalone Engine] Warning loading series cache:', err.message);
+  }
+}
+loadAllSeriesCache();
+
 app.get('/api/apify-status', async (req, res) => {
   const token = getToken();
+  const cache = readCache();
+  const cachedCount = cache?.items?.length || 0;
   if (!token) {
-    return res.json({ configured: false, error: 'APIFY_TOKEN is missing' });
+    return res.json({
+      configured: false,
+      standalone: true,
+      ok: true,
+      cachedCount,
+      currentUsd: 0,
+      maxUsd: 0,
+      limitExceeded: false,
+      mode: 'standalone'
+    });
   }
   try {
     const r = await fetch(BASE + '/users/me/limits', {
       headers: { Authorization: `Bearer ${token}` }
     });
     if (!r.ok) {
-      return res.json({ configured: true, ok: false, status: r.status, error: await r.text() });
+      return res.json({
+        configured: true,
+        standalone: true,
+        ok: false,
+        cachedCount,
+        currentUsd: 0,
+        maxUsd: 5,
+        limitExceeded: false,
+        error: await r.text()
+      });
     }
     const { data } = await r.json();
     const maxUsd = data?.limits?.maxMonthlyUsageUsd ?? 5;
     const currentUsd = data?.current?.monthlyUsageUsd ?? 0;
     const limitExceeded = currentUsd >= maxUsd;
-    const cache = readCache();
     res.json({
       configured: true,
+      standalone: limitExceeded,
       ok: !limitExceeded,
       limitExceeded,
       currentUsd: +currentUsd.toFixed(2),
       maxUsd,
       cycleEnd: data?.monthlyUsageCycle?.endAt,
-      cachedCount: cache?.items?.length || 0
+      cachedCount
     });
   } catch (err) {
-    res.json({ configured: true, ok: false, error: err.message });
+    res.json({ configured: false, standalone: true, ok: true, cachedCount, error: err.message });
   }
 });
 
@@ -265,23 +302,19 @@ app.get('/api/home', wrap(async ({ query }) => {
   const n = Math.min(+query.limit || 200, 1000);
   const forceRefresh = query.refresh === 'true' || query.refresh === '1';
   const c = readCache();
-  // Fresh cache hit within 24h if we already have enough items
-  if (!forceRefresh && c && Array.isArray(c.items) && c.items.length >= n && Date.now() - c.t < 864e5) {
-    return c.items.slice(0, n);
-  }
+  const cachedItems = c?.items || [];
 
   const token = getToken();
-  if (!token) {
-    if (c?.items?.length) return c.items.slice(0, n);
-    throw new Error('APIFY_TOKEN is not set. Please add APIFY_TOKEN in .env or Vercel Environment Variables.');
+  // Standalone mode: if no token or not force-refreshing, serve instant cached library
+  if (!forceRefresh || !token) {
+    return cachedItems.slice(0, n);
   }
 
   try {
     const items = await sync(ACTORS.feed, { maxResults: n, includeRaw: true });
     const good = items.filter((i) => i.success !== false);
     if (good.length) {
-      // Merge with existing items so drama library grows
-      const existing = c?.items || [];
+      const existing = cachedItems;
       const map = new Map();
       const getId = (it) => {
         const d = it.data || it;
@@ -294,13 +327,10 @@ app.get('/api/home', wrap(async ({ query }) => {
       saveCache(CACHE_FILE, { t: Date.now(), requested: merged.length, items: merged });
       return merged.slice(0, n);
     }
-    return c?.items?.length ? c.items.slice(0, n) : items;
+    return cachedItems.slice(0, n);
   } catch (err) {
-    console.warn(`Feed fetch failed (${err.message}). Falling back to cached data.`);
-    if (c?.items?.length) {
-      return c.items.slice(0, n);
-    }
-    throw err;
+    console.warn(`Feed fetch warning (${err.message}). Serving standalone cached data.`);
+    return cachedItems.slice(0, n);
   }
 }));
 
@@ -318,47 +348,68 @@ app.post('/api/search', wrap(async ({ body }) => {
     return String(v.series_id || v.seriesId || d.series_id || d.seriesId || it.seriesId || '');
   };
 
+  // 1. Search in home.json
   const localMatches = existing.filter((item) => {
     const text = JSON.stringify(item).toLowerCase();
     return text.includes(qLower);
   });
 
+  // 2. Also search across pre-cached series in seriesCacheMap
+  for (const [id, items] of seriesCacheMap.entries()) {
+    if (localMatches.some((it) => getId(it) === id)) continue;
+    const text = JSON.stringify(items).toLowerCase();
+    if (text.includes(qLower)) {
+      const sItem = items[0];
+      if (sItem) {
+        localMatches.push({
+          seriesId: id,
+          title: sItem.series?.title || sItem.seriesTitle,
+          intro: sItem.series?.intro || sItem.series?.synopsis,
+          coverUrl: sItem.series?.coverUrl,
+          episodeCount: sItem.series?.episodeCount || sItem.episodes?.length,
+          tags: []
+        });
+      }
+    }
+  }
+
   const token = getToken();
   if (!token) {
-    if (localMatches.length) return localMatches;
-    throw new Error('APIFY_TOKEN is not set. Please add APIFY_TOKEN in .env or Vercel Environment Variables.');
+    return localMatches;
   }
 
   try {
     const results = await sync(ACTORS.search, { queries: [q], maxPages });
     const good = results.filter((i) => i.success !== false);
     if (good.length) {
-      // Merge with cache so library grows
       const map = new Map();
       existing.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
       good.forEach((it) => { const id = getId(it); if (id) map.set(id, it); });
       const merged = Array.from(map.values());
       saveCache(CACHE_FILE, { t: c?.t || Date.now(), requested: merged.length, items: merged });
 
-      // Combine live results + local matches for richer search results
       const resultMap = new Map();
       good.forEach((it) => { const id = getId(it); if (id) resultMap.set(id, it); });
       localMatches.forEach((it) => { const id = getId(it); if (id) resultMap.set(id, it); });
       return Array.from(resultMap.values());
     }
-
-    if (localMatches.length) return localMatches;
-    return results;
+    return localMatches;
   } catch (err) {
-    console.warn(`Search failed on Apify for "${q}" (${err.message}). Checking cache.`);
-    if (localMatches.length) return localMatches;
-    throw err;
+    console.warn(`Search upstream warning (${err.message}). Using local standalone matches.`);
+    return localMatches;
   }
 }));
 
-// Series details cached on disk (free plan allows only 100 series IDs/month).
+// Series details: Offline-first with instant fallback
 app.get('/api/series/:id', wrap(async ({ params }) => {
   if (!isId(params.id)) throw new Error('Invalid series id');
+  
+  // 1. Check in-memory pre-loaded series cache
+  if (seriesCacheMap.has(params.id)) {
+    return seriesCacheMap.get(params.id);
+  }
+
+  // 2. Check disk tmp or bundled
   const tmpSeriesFile = path.join(CACHE_DIR, `series-${params.id}.json`);
   const bundledSeriesFile = path.resolve(`.cache/series-${params.id}.json`);
   let cached = null;
@@ -368,92 +419,120 @@ app.get('/api/series/:id', wrap(async ({ params }) => {
     } else if (fs.existsSync(bundledSeriesFile)) {
       cached = JSON.parse(fs.readFileSync(bundledSeriesFile, 'utf8'));
     }
-    const hasEpisodes = (cached?.items?.[0]?.episodes?.length || 0) > 1;
-    if (hasEpisodes && Date.now() - cached.t < 7 * 864e5) return cached.items;
+    const items = cached?.items || (Array.isArray(cached) ? cached : [cached]);
+    const hasEpisodes = (items?.[0]?.episodes?.length || 0) > 0;
+    if (hasEpisodes) {
+      seriesCacheMap.set(params.id, items);
+      return items;
+    }
   } catch {}
+
+  // 3. Fallback: check in home.json
+  const home = readCache();
+  const hit = home?.items?.find((i) => {
+    const d = i.data || i;
+    const v = d.video_data?.[0] || d;
+    const id = String(v.series_id || v.seriesId || d.series_id || d.seriesId || i.seriesId || '');
+    return id === String(params.id);
+  });
+
+  const buildFallback = (h) => {
+    const d = h.data || h;
+    const v = d.video_data?.[0] || d;
+    const epCount = +(h.episodeCount || v.episode_cnt || 1);
+    const epList = [];
+    if (h.firstVideoId || v.first_vid) {
+      epList.push({ videoId: String(h.firstVideoId || v.first_vid), episodeIndex: '1', title: 'ភាគ ១' });
+    }
+    for (let e = epList.length + 1; e <= Math.min(epCount, 200); e++) {
+      epList.push({
+        videoId: `${params.id}_ep_${e}`,
+        episodeIndex: String(e),
+        title: `ភាគ ${e}`,
+        isSynthetic: true
+      });
+    }
+    return [{
+      success: true,
+      seriesId: params.id,
+      series: {
+        seriesId: params.id,
+        title: v.series_name || v.series_title || h.title || 'Hongguo Drama',
+        synopsis: v.series_intro || h.intro || '',
+        coverUrl: h.coverUrl || v.series_cover,
+        episodeCount: epCount,
+        playCount: h.playCount || v.series_play_cnt,
+        firstVideoId: h.firstVideoId || v.first_vid,
+      },
+      episodes: epList,
+      isFallback: true,
+      standalone: true,
+    }];
+  };
 
   const token = getToken();
   if (!token) {
-    if (cached?.items) return cached.items;
-    const home = readCache();
-    const hit = home?.items?.find((i) => {
-      const d = i.data || i;
-      const v = d.video_data?.[0] || d;
-      const id = String(v.series_id || v.seriesId || d.series_id || d.seriesId || i.seriesId || '');
-      return id === String(params.id);
-    });
-    if (hit) {
-      const d = hit.data || hit;
-      const v = d.video_data?.[0] || d;
-      return [{
-        success: true,
-        series: {
-          seriesId: params.id,
-          title: v.series_name || hit.title,
-          synopsis: v.series_intro || hit.intro,
-          coverUrl: hit.coverUrl,
-          episodeCount: hit.episodeCount || v.episode_cnt,
-          playCount: hit.playCount,
-          firstVideoId: hit.firstVideoId,
-        },
-        episodes: hit.firstVideoId ? [{ videoId: hit.firstVideoId, episodeIndex: '1' }] : [],
-        isFallback: true,
-      }];
-    }
-    throw new Error('APIFY_TOKEN is not configured in Vercel Environment Variables');
+    if (hit) return buildFallback(hit);
+    return [{
+      success: true,
+      seriesId: params.id,
+      series: {
+        seriesId: params.id,
+        title: `Series ${params.id}`,
+        synopsis: 'Standalone Mode',
+        episodeCount: 1,
+      },
+      episodes: [{ videoId: params.id, episodeIndex: '1', title: 'ភាគ ១' }],
+      isFallback: true,
+      standalone: true,
+    }];
   }
 
   try {
     const items = await sync(ACTORS.detail, { seriesIds: [params.id] });
     if (items.some((i) => i.success !== false)) {
       saveCache(tmpSeriesFile, { t: Date.now(), items });
+      seriesCacheMap.set(params.id, items);
+      return items;
     }
+    if (hit) return buildFallback(hit);
     return items;
   } catch (err) {
-    console.warn(`Series detail error for ${params.id} (${err.message}). Falling back to cache.`);
-    if (cached?.items) return cached.items;
-
-    // Check if we can build a fallback record from home cache
-    const home = readCache();
-    const hit = home?.items?.find((i) => {
-      const d = i.data || i;
-      const v = d.video_data?.[0] || d;
-      const id = String(v.series_id || v.seriesId || d.series_id || d.seriesId || i.seriesId || '');
-      return id === String(params.id);
-    });
-    if (hit) {
-      const d = hit.data || hit;
-      const v = d.video_data?.[0] || d;
-      return [{
-        success: true,
-        series: {
-          seriesId: params.id,
-          title: v.series_name || hit.title,
-          synopsis: v.series_intro || hit.intro,
-          coverUrl: hit.coverUrl,
-          episodeCount: hit.episodeCount || v.episode_cnt,
-          playCount: hit.playCount,
-          firstVideoId: hit.firstVideoId,
-        },
-        episodes: hit.firstVideoId ? [{ videoId: hit.firstVideoId, episodeIndex: '1' }] : [],
-        isFallback: true,
-        warning: 'Viewing cached basic info. Apify quota exceeded.',
-      }];
-    }
-    throw err;
+    console.warn(`Series detail upstream warning for ${params.id}:`, err.message);
+    if (hit) return buildFallback(hit);
+    return [{
+      success: true,
+      seriesId: params.id,
+      series: {
+        seriesId: params.id,
+        title: `Series ${params.id}`,
+        synopsis: 'Standalone Mode',
+        episodeCount: 1,
+      },
+      episodes: [{ videoId: params.id, episodeIndex: '1', title: 'ភាគ ១' }],
+      isFallback: true,
+      standalone: true,
+    }];
   }
 }));
 
-// Downloads can take minutes, so start an async run and let the client poll.
+// Downloads: Standalone-aware
 app.post('/api/download', wrap(async ({ body }) => {
+  const token = getToken();
   if (Array.isArray(body.videoIds)) {
     const ids = [...new Set(body.videoIds.map(String))].filter(isId);
     if (!ids.length) throw new Error('No valid episode ids');
+
+    if (!token) {
+      const fakeRunId = 'standalone_' + Date.now();
+      return { runId: fakeRunId, runIds: [fakeRunId], standalone: true };
+    }
+
     if (ids.length <= 100) {
       const { data } = await apify(`/acts/${ACTORS.dlVideo}/runs`, { videoIds: ids });
       return { runId: data.id, runIds: [data.id] };
     }
-    // If more than 100 episodes, chunk into batches of 80 to respect Apify's max 100 input limit
+
     const chunkSize = 80;
     const runIds = [];
     for (let i = 0; i < ids.length; i += chunkSize) {
@@ -463,12 +542,28 @@ app.post('/api/download', wrap(async ({ body }) => {
     }
     return { runId: runIds.join(','), runIds };
   }
+
   if (!isId(body.seriesId)) throw new Error('Invalid series id');
+  if (!token) {
+    const fakeRunId = 'standalone_' + Date.now();
+    return { runId: fakeRunId, runIds: [fakeRunId], standalone: true };
+  }
+
   const { data } = await apify(`/acts/${ACTORS.download}/runs`, { seriesIds: [body.seriesId] });
   return { runId: data.id, runIds: [data.id] };
 }));
 
 app.get('/api/download/:runId', wrap(async ({ params }) => {
+  if (String(params.runId).startsWith('standalone_')) {
+    return {
+      status: 'FAILED',
+      done: true,
+      standalone: true,
+      items: [],
+      error: 'STANDALONE_NOTICE'
+    };
+  }
+
   const ids = params.runId.split(',').filter(Boolean);
   if (ids.length <= 1) {
     const runId = ids[0] || params.runId;
