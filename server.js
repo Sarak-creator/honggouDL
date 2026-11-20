@@ -647,6 +647,31 @@ app.get('/api/file', async (req, res) => {
 });
 
 // ---- Yeguo (yeguodj.com) Downloader & Streaming Engine ------------------
+// Auto-detect FFmpeg binary path across Windows & UNIX environments
+function findFfmpeg() {
+  const possible = [
+    process.env.FFMPEG_PATH,
+    path.join(process.env.LOCALAPPDATA || '', 'Python', 'bin', 'ffmpeg.exe'),
+    path.join(process.env.USERPROFILE || '', 'AppData', 'Local', 'Python', 'bin', 'ffmpeg.exe'),
+    'C:\\Users\\user\\AppData\\Local\\Python\\bin\\ffmpeg.exe',
+    path.join(process.env.PROGRAMFILES || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+    path.join(process.env['PROGRAMFILES(X86)'] || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+    'C:\\ffmpeg\\bin\\ffmpeg.exe',
+  ].filter(Boolean);
+
+  for (const p of possible) {
+    if (fs.existsSync(p)) {
+      const dir = path.dirname(p);
+      if (!process.env.PATH.includes(dir)) {
+        process.env.PATH = `${dir};${process.env.PATH}`;
+      }
+      return p;
+    }
+  }
+  return 'ffmpeg';
+}
+const FFMPEG_BIN = findFfmpeg();
+
 const YEGUO_CONFIG = {
   key: '2acf7e91e9864673',
   iv: '1c29882d3ddfcfd6',
@@ -811,10 +836,8 @@ app.get('/api/yeguo/series/:id', wrap(async ({ params }) => {
       title: epTitle,
       duration: ep.duration || ep.episode_duration || 0,
       videoUrl: vUrl,
-      playUrl: vUrl ? `/api/yeguo/stream?url=${encodeURIComponent(vUrl)}` : '',
-      downloadUrl: vUrl
-        ? `/api/yeguo/stream?url=${encodeURIComponent(vUrl)}&download=1&name=${encodeURIComponent(safeTitle)}`
-        : '',
+      playUrl: `/api/yeguo/stream?videoId=${videoId}&episodeId=${epId}${vUrl ? `&url=${encodeURIComponent(vUrl)}` : ''}`,
+      downloadUrl: `/api/yeguo/stream?videoId=${videoId}&episodeId=${epId}&download=1&name=${encodeURIComponent(safeTitle)}${vUrl ? `&url=${encodeURIComponent(vUrl)}` : ''}`,
       isYeguo: true,
       platform: 'yeguo',
       definition: ep.resolution || '720p',
@@ -840,10 +863,23 @@ app.get('/api/yeguo/series/:id', wrap(async ({ params }) => {
 }));
 
 // Streaming and Remuxing endpoint: converts HLS m3u8 stream to MP4 on-the-fly
-app.get('/api/yeguo/stream', (req, res) => {
+app.get('/api/yeguo/stream', async (req, res) => {
   try {
-    const rawUrl = String(req.query.url || '');
-    if (!rawUrl) return res.status(400).send('Missing url');
+    let rawUrl = String(req.query.url || '');
+    const videoId = String(req.query.videoId || '');
+    const episodeId = String(req.query.episodeId || '');
+
+    // Auto-refresh URL if missing or if videoId & episodeId are provided
+    if ((!rawUrl || rawUrl === 'undefined') && videoId && episodeId) {
+      try {
+        const play = await callYeguoApi('/api/playlet/play', { video_id: videoId, episode_id: episodeId });
+        rawUrl = play?.video_url || '';
+      } catch (e) {
+        console.warn(`[Auto-refresh URL Error] ${e.message}`);
+      }
+    }
+
+    if (!rawUrl) return res.status(400).send('Missing video url');
 
     const u = new URL(rawUrl);
     if (u.protocol !== 'https:' && u.protocol !== 'http:') {
@@ -885,7 +921,7 @@ app.get('/api/yeguo/stream', (req, res) => {
       'pipe:1'
     ];
 
-    const ffmpegProc = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const ffmpegProc = spawn(FFMPEG_BIN, ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stderrData = '';
     ffmpegProc.stderr.on('data', (d) => {

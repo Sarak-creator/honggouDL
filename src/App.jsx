@@ -975,7 +975,10 @@ function Detail({ series, onClose, lang }) {
         if (item && item.videoUrl) {
           const downloadUrl = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
           const res = await fetch(downloadUrl);
-          if (!res.ok) throw new Error(`Failed to fetch ${epLabel} (${res.status})`);
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => '');
+            throw new Error(`Failed to fetch ${epLabel} (${res.status})${errBody ? `: ${errBody}` : ''}`);
+          }
           const blob = await res.blob();
           const cleanEpName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
           folder.file(`${cleanEpName}.mp4`, blob);
