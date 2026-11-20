@@ -92,6 +92,11 @@ export const TRANSLATIONS = {
     zipPartAll: 'ទាញយកទាំងអស់ក្នុង 1 ZIP ធំ ({count} ភាគ)',
     zipPartItem: 'វគ្គទី {part} (ភាគ {from} - {to})',
     zipHint: 'ឯកសារ .zip អាចពន្លាជាមួយ WinRAR, 7-Zip ឬបើកលើទូរស័ព្ទបានយ៉ាងងាយស្រួល។',
+    platformHongguo: 'Hongguo (红果)',
+    platformYeguo: 'Yeguo (野果短剧)',
+    searchPlaceholderYeguo: 'ដាក់តំណភ្ជាប់ yeguodj.com ឬស្វែងរកចំណងជើង (ឧ. https://yeguodj.com/drama/detail/4183/)',
+    yeguoDirectNotice: '⚡ វីដេអូបានត្រៀមរួចរាល់សម្រាប់ការទាញយកភ្លាមៗ (yeguodj.com)',
+    yeguoTag: '野果 Yeguo',
   },
   en: {
     appTitle: 'Hongguo Drama Video Downloader',
@@ -161,6 +166,11 @@ export const TRANSLATIONS = {
     zipPartAll: 'All in 1 large ZIP ({count} episodes)',
     zipPartItem: 'Part {part} (Ep {from} - {to})',
     zipHint: '.zip files can be extracted with WinRAR, 7-Zip, or opened directly on iPhone/Android.',
+    platformHongguo: 'Hongguo (红果)',
+    platformYeguo: 'Yeguo (yeguodj.com)',
+    searchPlaceholderYeguo: 'Paste yeguodj.com link or search titles (e.g. https://yeguodj.com/drama/detail/4183/)',
+    yeguoDirectNotice: '⚡ Direct download ready (yeguodj.com - no Apify limits)',
+    yeguoTag: 'Yeguo',
   },
   'zh-CN': {
     appTitle: '红果短剧视频下载器',
@@ -230,6 +240,11 @@ export const TRANSLATIONS = {
     zipPartAll: '全部打包为 1 个大 ZIP ({count}集)',
     zipPartItem: '第 {part} 卷 (第 {from} - {to} 集)',
     zipHint: '.zip 压缩包可用 WinRAR、7-Zip 解压，或在手机文件管理中直接打开。',
+    platformHongguo: '红果短剧',
+    platformYeguo: '野果短剧 (yeguodj.com)',
+    searchPlaceholderYeguo: '粘贴 yeguodj.com 链接或搜索短剧标题（例如 https://yeguodj.com/drama/detail/4183/）',
+    yeguoDirectNotice: '⚡ 直链即刻下载（野果短剧 yeguodj.com，无 Apify 配额限制）',
+    yeguoTag: '野果短剧',
   }
 };
 

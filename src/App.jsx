@@ -88,6 +88,18 @@ function toTags(v) {
 const TAG_KEYS = ['recommendReasons', 'tags', 'categories', 'category', 'genre', 'raw.tags', 'raw.series_tags', 'raw.category', 'raw.categories'];
 
 function normalize(item) {
+  if (item.platform === 'yeguo' || item.isYeguo) {
+    return {
+      id: String(item.id || item.video_id),
+      title: item.title || 'Untitled',
+      cover: item.cover,
+      episodes: item.episodes || item.episode_count || 1,
+      desc: item.desc || item.description || '',
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      platform: 'yeguo',
+      isYeguo: true,
+    };
+  }
   const d = item.data || item;
   const v = d.video_data?.[0] || d;
   return {
@@ -97,7 +109,23 @@ function normalize(item) {
     episodes: pick(v, 'episode_cnt', 'episodeCount', 'series.episodeCount', 'series_count'),
     desc: pick(v, 'series_intro', 'intro', 'synopsis', 'series.synopsis', 'introduction', 'desc'),
     tags: [...new Set(TAG_KEYS.flatMap((k) => toTags(dig(v, k))))].slice(0, 8),
+    platform: 'hongguo',
+    isYeguo: false,
   };
+}
+
+function extractYeguoId(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+  const urlMatch = s.match(/(?:yeguodj|ygdj\d*)\.(?:com|app|cc|cn)\/drama\/(?:detail|video)\/(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+  const prefixMatch = s.match(/(?:yeguo(?:dj)?)[ :#/_-]+(\d+)/i);
+  if (prefixMatch) return prefixMatch[1];
+  if (s.includes('yeguodj') && /\d+/.test(s)) {
+    const m = s.match(/\d{3,10}/);
+    if (m) return m[0];
+  }
+  return null;
 }
 
 // ---- main app ------------------------------------------------------------
@@ -117,6 +145,7 @@ export default function App() {
     setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
   };
 
+  const [platform, setPlatform] = useState(() => localStorage.getItem('hg_platform') || 'hongguo');
   const [lang, setLang] = useState(() => localStorage.getItem('hg_app_lang') || 'km');
   const [titles, setTitles] = useState({});
   const [query, setQuery] = useState('');
@@ -149,22 +178,39 @@ export default function App() {
       : 'No results returned.';
   }
 
-  async function loadHome() {
+  async function loadHome(targetPlat = platform) {
     setLoading(true); setError(''); setMode('home'); setCat('All');
     setVisibleCount(PAGE_SIZE);
     setHasMoreServer(true);
     try {
-      const items = await api('/api/home?limit=200');
-      setRaw(items[0] || null);
-      const cards = toCards(items);
-      setResults(cards);
-      setError(explain(items, cards));
+      if (targetPlat === 'yeguo') {
+        const items = await api('/api/yeguo/home?limit=24&page=1');
+        setRaw(items[0] || null);
+        const cards = toCards(items);
+        setResults(cards);
+        if (!cards.length) setError('No dramas returned from Yeguo.');
+      } else {
+        const items = await api('/api/home?limit=200');
+        setRaw(items[0] || null);
+        const cards = toCards(items);
+        setResults(cards);
+        setError(explain(items, cards));
+      }
     } catch (err) { setError(err.message); }
     setLoading(false);
   }
 
+  const switchPlatform = (nextPlat) => {
+    if (nextPlat === platform) return;
+    setPlatform(nextPlat);
+    localStorage.setItem('hg_platform', nextPlat);
+    setQuery('');
+    setSelected(null);
+    loadHome(nextPlat);
+  };
+
   useEffect(() => {
-    loadHome();
+    loadHome(platform);
     fetch('/api/apify-status')
       .then((r) => r.json())
       .then((d) => {
@@ -187,14 +233,26 @@ export default function App() {
       setLoading(true);
       setError('');
       try {
-        const nextLimit = results.length + PAGE_SIZE;
-        const items = await api(`/api/home?limit=${nextLimit}`);
-        const cards = toCards(items);
-        if (cards.length > results.length) {
-          setResults(cards);
-          setVisibleCount((prev) => prev + PAGE_SIZE);
+        if (platform === 'yeguo') {
+          const nextPage = Math.floor(results.length / PAGE_SIZE) + 1;
+          const items = await api(`/api/yeguo/home?limit=${PAGE_SIZE}&page=${nextPage}`);
+          const cards = toCards(items);
+          if (cards.length) {
+            setResults((prev) => [...prev, ...cards]);
+            setVisibleCount((prev) => prev + PAGE_SIZE);
+          } else {
+            setHasMoreServer(false);
+          }
         } else {
-          setHasMoreServer(false);
+          const nextLimit = results.length + PAGE_SIZE;
+          const items = await api(`/api/home?limit=${nextLimit}`);
+          const cards = toCards(items);
+          if (cards.length > results.length) {
+            setResults(cards);
+            setVisibleCount((prev) => prev + PAGE_SIZE);
+          } else {
+            setHasMoreServer(false);
+          }
         }
       } catch (err) {
         setError(err.message);
@@ -203,15 +261,23 @@ export default function App() {
     }
   }
 
-  async function runSearch(q) {
+  async function runSearch(q, targetPlat = platform) {
     setMode('search'); setCat('All'); setLoading(true); setError(''); setSelected(null);
     setVisibleCount(PAGE_SIZE);
     try {
-      const items = await api('/api/search', { query: q, maxPages: 3 });
-      setRaw(items.find((i) => i.success !== false) || items[0] || null);
-      const cards = toCards(items);
-      setResults(cards);
-      setError(explain(items, cards));
+      if (targetPlat === 'yeguo') {
+        const items = await api('/api/yeguo/search', { query: q, limit: 30 });
+        setRaw(items[0] || null);
+        const cards = toCards(items);
+        setResults(cards);
+        if (!cards.length) setError('No results found for “' + q + '” on Yeguo.');
+      } else {
+        const items = await api('/api/search', { query: q, maxPages: 3 });
+        setRaw(items.find((i) => i.success !== false) || items[0] || null);
+        const cards = toCards(items);
+        setResults(cards);
+        setError(explain(items, cards));
+      }
     } catch (err) { setError(err.message); }
     setLoading(false);
   }
@@ -219,24 +285,51 @@ export default function App() {
   async function search(e) {
     e.preventDefault();
     const q = query.trim();
-    if (!q) return loadHome();
+    if (!q) return loadHome(platform);
 
-    // If query has no Chinese characters and user is in Khmer/English, translate to Chinese for Hongguo search
+    // Check if user entered a yeguodj.com link or ID
+    const yeguoId = extractYeguoId(q);
+    if (yeguoId) {
+      if (platform !== 'yeguo') {
+        setPlatform('yeguo');
+        localStorage.setItem('hg_platform', 'yeguo');
+      }
+      setSelected({
+        id: yeguoId,
+        title: `Yeguo Drama ${yeguoId}`,
+        platform: 'yeguo',
+        isYeguo: true,
+      });
+      return;
+    }
+
+    // If currently on Yeguo and input is a pure numeric ID (e.g. 4183)
+    if (platform === 'yeguo' && /^\d{1,10}$/.test(q)) {
+      setSelected({
+        id: q,
+        title: `Yeguo Drama ${q}`,
+        platform: 'yeguo',
+        isYeguo: true,
+      });
+      return;
+    }
+
+    // If query has no Chinese characters and user is in Khmer/English, translate to Chinese for search
     const hasChinese = /[\u4e00-\u9fa5]/.test(q);
     if (!hasChinese && lang !== 'zh-CN') {
       setLoading(true);
       try {
         const zh = await translateText(q, 'zh-CN', 'auto');
         if (zh && zh.trim() !== q) {
-          return runSearch(zh.trim());
+          return runSearch(zh.trim(), platform);
         }
       } catch (err) {
         console.warn('Search translation error:', err);
       }
     }
-    runSearch(q);
+    runSearch(q, platform);
   }
-  function pickGenre(g) { setQuery(g); runSearch(g); }
+  function pickGenre(g) { setQuery(g); runSearch(g, platform); }
 
   const counts = useMemo(() => {
     const c = {};
@@ -286,6 +379,7 @@ export default function App() {
   }, [shown, lang, titles]);
 
   const isLimitExceeded = Boolean(
+    platform === 'hongguo' &&
     !apifyStatus?.standalone && (
       apifyStatus?.limitExceeded ||
       (error && (error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage') || error.includes('platform-feature-disabled')))
@@ -308,15 +402,15 @@ export default function App() {
       </div>*/}
 
       <div className="top">
-        <div className="app-brand" onClick={() => loadHome()} style={{ cursor: 'pointer' }} title={t('appTitle', lang)}>
+        <div className="app-brand" onClick={() => loadHome(platform)} style={{ cursor: 'pointer' }} title={t('appTitle', lang)}>
           <img
             src="/icon.svg"
-            alt="Hongguo App Logo"
+            alt="App Logo"
             className="app-logo"
             width="42"
             height="42"
           />
-          <h1>{t('appTitle', lang)}</h1>
+          <h1>{platform === 'yeguo' ? (lang === 'zh-CN' ? '野果短剧下载器 (yeguodj.com)' : (lang === 'km' ? 'កម្មវិធីទាញយកវីដេអូរឿងភាគខ្លី Yeguo (yeguodj.com)' : 'Yeguo Drama Downloader (yeguodj.com)')) : t('appTitle', lang)}</h1>
         </div>
         <div className="top-actions">
           <div className="lang-flags" role="group" aria-label="Language selection">
@@ -361,6 +455,30 @@ export default function App() {
         </div>
       </div>
 
+      <div className="platform-switch" role="tablist" aria-label="Select Video Platform">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={platform === 'hongguo'}
+          className={`platform-tab ${platform === 'hongguo' ? 'active' : ''}`}
+          onClick={() => switchPlatform('hongguo')}
+        >
+          <span>🍎</span>
+          <span>{t('platformHongguo', lang)}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={platform === 'yeguo'}
+          className={`platform-tab ${platform === 'yeguo' ? 'active' : ''}`}
+          onClick={() => switchPlatform('yeguo')}
+        >
+          <span>🍇</span>
+          <span>{t('platformYeguo', lang)}</span>
+          <span className="platform-pill">Direct</span>
+        </button>
+      </div>
+
       <form onSubmit={search} className="search-box-wrapper">
         <div className="search-icon-left" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" width="18" height="18">
@@ -372,7 +490,7 @@ export default function App() {
           className="search-input"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={t('searchPlaceholder', lang)}
+          placeholder={platform === 'yeguo' ? t('searchPlaceholderYeguo', lang) : t('searchPlaceholder', lang)}
         />
         {query && (
           <button
@@ -451,7 +569,9 @@ export default function App() {
 
       <h2 className="sec">
         {mode === 'home' ? `${t('allDramas', lang)} (${filteredResults.length})` : `${t('resultsFor', lang)} “${query}” (${filteredResults.length})`}
-        {apifyStatus?.standalone ? (
+        {platform === 'yeguo' ? (
+          <span className="yeguo-badge">🍇 yeguodj.com · Direct</span>
+        ) : apifyStatus?.standalone ? (
           <span className="cached-badge" style={{ backgroundColor: '#059669', color: '#fff', marginLeft: '8px' }}>
             ⚡ Standalone Database
           </span>
@@ -459,7 +579,7 @@ export default function App() {
           <span className="cached-badge">{t('offlineBadge', lang)}</span>
         )}
       </h2>
-      {mode === 'search' && <button className="link" onClick={() => loadHome()}>{t('backHome', lang)}</button>}
+      {mode === 'search' && <button className="link" onClick={() => loadHome(platform)}>{t('backHome', lang)}</button>}
 
       {tagList.length > 0 && (
         <div className="chips">
@@ -547,21 +667,43 @@ function Detail({ series, onClose, lang }) {
   const [transDesc, setTransDesc] = useState('');
 
   useEffect(() => {
-    api(`/api/series/${series.id}`)
+    const isYeguo = series.platform === 'yeguo' || series.isYeguo;
+    const detailUrl = isYeguo ? `/api/yeguo/series/${series.id}` : `/api/series/${series.id}`;
+
+    api(detailUrl)
       .then((r) => {
         const row = r.find((x) => x.success !== false) || r[0];
         if (!row || row.success === false)
           setError(row?.errorCode === 'FREE_TIER_MONTHLY_QUOTA_REACHED'
             ? t('quotaError', lang)
             : row?.error || 'Could not load series details.');
-        else setInfo(row);
+        else {
+          setInfo(row);
+          if (row.platform === 'yeguo' || row.isYeguo || isYeguo) {
+            const initReady = {};
+            (row.episodes || []).forEach((ep) => {
+              if (ep.videoUrl || ep.downloadUrl) {
+                initReady[String(ep.videoId)] = {
+                  videoId: ep.videoId,
+                  videoUrl: ep.videoUrl,
+                  downloadUrl: ep.downloadUrl,
+                  playUrl: ep.playUrl,
+                  definition: ep.definition || '720p',
+                  codec: ep.codec || 'H.264',
+                  success: true,
+                };
+              }
+            });
+            setReady(initReady);
+          }
+        }
       })
       .catch((e) => setError(e.message));
     return () => {
       cancelDownloadRef.current = true;
       timers.current.forEach(clearInterval);
     };
-  }, [series.id, lang]);
+  }, [series.id, series.platform, series.isYeguo, lang]);
 
   const s = info?.series || {};
   const rawTitle = s.title || series.title;
@@ -649,8 +791,11 @@ function Detail({ series, onClose, lang }) {
   }
 
   const toggle = (id) => setSel((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const fileUrl = (item, ep, n) =>
-    `/api/file?u=${encodeURIComponent(item.videoUrl)}&name=${encodeURIComponent(`${title} ${label(ep, n)}`)}`;
+  const fileUrl = (item, ep, n) => {
+    if (item?.downloadUrl) return item.downloadUrl;
+    if (ep?.downloadUrl) return ep.downloadUrl;
+    return `/api/file?u=${encodeURIComponent(item?.videoUrl || '')}&name=${encodeURIComponent(`${title} ${label(ep, n)}`)}`;
+  };
   const busy = Object.keys(pending).length;
   const readyCount = eps.filter((e) => ready[String(e.videoId)]?.videoUrl).length;
   const nextReady = playing && eps.slice(eps.indexOf(playing.ep) + 1).find((e) => ready[String(e.videoId)]);
@@ -877,7 +1022,7 @@ function Detail({ series, onClose, lang }) {
 
         {playing && (
           <div className="player">
-            <video key={playing.item.videoUrl} src={playing.item.videoUrl} poster={findCover(playing.ep) || cover}
+            <video key={playing.item.playUrl || playing.item.videoUrl} src={playing.item.playUrl || playing.item.videoUrl} poster={findCover(playing.ep) || cover}
               controls autoPlay playsInline onEnded={playNext} />
             <p className="row">
               <strong>{title} · {label(playing.ep, eps.indexOf(playing.ep))}</strong>

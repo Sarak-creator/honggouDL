@@ -5,6 +5,8 @@ import convert from 'heic-convert';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 
 dotenv.config();
@@ -631,6 +633,236 @@ app.get('/api/file', async (req, res) => {
   } catch { res.sendStatus(502); }
 });
 
+// ---- Yeguo (yeguodj.com) Downloader & Streaming Engine ------------------
+const YEGUO_CONFIG = {
+  key: '2acf7e91e9864673',
+  iv: '1c29882d3ddfcfd6',
+  signKey: '5589d41f92a597d016b037ac37db243d',
+  baseUrl: 'https://www.yeguodj.com/api.php',
+};
+
+function decryptYeguoData(encryptedBase64) {
+  if (!encryptedBase64 || typeof encryptedBase64 !== 'string') return null;
+  try {
+    const key = Buffer.from(YEGUO_CONFIG.key, 'utf8');
+    const iv = Buffer.from(YEGUO_CONFIG.iv, 'utf8');
+    const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+    decipher.setAutoPadding(true);
+    let decrypted = decipher.update(encryptedBase64.replace(/ /g, '+'), 'base64', 'utf8');
+    decrypted += decipher.final('utf8');
+    return JSON.parse(decrypted);
+  } catch (err) {
+    console.warn('[Yeguo Decrypt Error]', err.message);
+    return null;
+  }
+}
+
+async function callYeguoApi(endpoint, extraParams = {}) {
+  const params = new URLSearchParams({
+    bundleId: 'com.pwa.mater',
+    version: '1.3.2',
+    oauth_type: 'web',
+    language: 'zh',
+    via: 'pwa',
+    oauth_id: '7d05538c4b8a5e74e82f93c0dab0163c',
+    token: '',
+    trace_id: '7d05538c4b8a5e74e82f93c0dab0163c',
+    ...extraParams,
+  });
+
+  const res = await fetch(`${YEGUO_CONFIG.baseUrl}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Origin': 'https://www.yeguodj.com',
+      'Referer': 'https://www.yeguodj.com/'
+    },
+    body: params.toString(),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Yeguo API upstream error ${res.status}`);
+  }
+
+  const json = await res.json();
+  if (json.data) {
+    const dec = decryptYeguoData(json.data);
+    return dec?.data ?? dec;
+  }
+  return json;
+}
+
+app.get('/api/yeguo/home', wrap(async ({ query }) => {
+  const page = Math.max(1, +query.page || 1);
+  const limit = Math.min(100, Math.max(1, +query.limit || 24));
+  const data = await callYeguoApi('/api/theater/exploreList', { page, limit });
+  const rawList = data?.list || (Array.isArray(data) ? data : []);
+  const items = rawList.map((item) => ({
+    id: String(item.video_id || item.id),
+    title: item.title || 'Untitled',
+    cover: item.cover || '',
+    episodes: item.episodes || item.episode_count || 1,
+    desc: item.description || '',
+    tags: Array.isArray(item.tags) ? item.tags : [],
+    platform: 'yeguo',
+    isYeguo: true,
+  }));
+  return items;
+}));
+
+app.post('/api/yeguo/search', wrap(async ({ body }) => {
+  const q = String(body.query || '').trim();
+  if (!q) throw new Error('Empty query');
+  const page = Math.max(1, +body.page || 1);
+  const limit = Math.min(100, Math.max(1, +body.limit || 24));
+  const data = await callYeguoApi('/api/search/result', { keyword: q, page, limit });
+  const rawList = data?.list || (Array.isArray(data) ? data : []);
+  const items = rawList.map((item) => ({
+    id: String(item.video_id || item.id),
+    title: item.title || 'Untitled',
+    cover: item.cover || '',
+    episodes: item.episodes || item.episode_count || 1,
+    desc: item.description || '',
+    tags: Array.isArray(item.tags) ? item.tags : [],
+    platform: 'yeguo',
+    isYeguo: true,
+  }));
+  return items;
+}));
+
+app.get('/api/yeguo/series/:id', wrap(async ({ params }) => {
+  const videoId = String(params.id).trim();
+  if (!/^\d+$/.test(videoId)) throw new Error('Invalid Yeguo series id');
+
+  // 1. Fetch drama detail
+  const detail = await callYeguoApi('/api/playlet/detail', {
+    video_id: videoId,
+    episode_id: '0',
+    related_limit: '10',
+  });
+
+  if (!detail) throw new Error('Yeguo drama not found');
+
+  const firstEpId = detail.episodes?.[0]?.id || 0;
+
+  // 2. Fetch play info which contains direct video_urls for all episodes
+  let play = null;
+  try {
+    play = await callYeguoApi('/api/playlet/play', {
+      video_id: videoId,
+      episode_id: String(firstEpId),
+    });
+  } catch (err) {
+    console.warn(`[Yeguo Play API Error] ${err.message}`);
+  }
+
+  const allEps = play?.episodeAll || detail?.episodes || [];
+  const dramaTitle = detail.title || play?.video_title || `Yeguo Drama ${videoId}`;
+  const dramaDesc = detail.description || play?.description || '';
+  const dramaCover = detail.cover || play?.cover_img || '';
+
+  const mappedEpisodes = allEps.map((ep, idx) => {
+    const epNum = ep.sort ?? ep.index ?? (idx + 1);
+    const epId = String(ep.id || `${videoId}_${epNum}`);
+    const epTitle = ep.episode_title || ep.title || `${dramaTitle} 第${epNum}集`;
+    const vUrl = ep.video_url || play?.video_url || '';
+    const safeTitle = `${dramaTitle} Ep ${epNum}`;
+    return {
+      videoId: epId,
+      episodeIndex: String(epNum),
+      title: epTitle,
+      duration: ep.duration || ep.episode_duration || 0,
+      videoUrl: vUrl,
+      playUrl: vUrl ? `/api/yeguo/stream?url=${encodeURIComponent(vUrl)}` : '',
+      downloadUrl: vUrl
+        ? `/api/yeguo/stream?url=${encodeURIComponent(vUrl)}&download=1&name=${encodeURIComponent(safeTitle)}`
+        : '',
+      isYeguo: true,
+      platform: 'yeguo',
+      definition: ep.resolution || '720p',
+      codec: 'H.264',
+    };
+  });
+
+  return [{
+    success: true,
+    seriesId: videoId,
+    platform: 'yeguo',
+    isYeguo: true,
+    series: {
+      seriesId: videoId,
+      title: dramaTitle,
+      synopsis: dramaDesc,
+      coverUrl: dramaCover,
+      episodeCount: detail.episode_count || mappedEpisodes.length,
+      tags: detail.tags || [],
+    },
+    episodes: mappedEpisodes,
+  }];
+}));
+
+// Streaming and Remuxing endpoint: converts HLS m3u8 stream to MP4 on-the-fly
+app.get('/api/yeguo/stream', (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || '');
+    if (!rawUrl) return res.status(400).send('Missing url');
+
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+      return res.status(400).send('Invalid protocol');
+    }
+
+    const isDownload = req.query.download === '1' || req.query.download === 'true';
+    const fileName = String(req.query.name || 'yeguo_video').replace(/[\\/:*?"<>|]/g, '_').slice(0, 100);
+
+    const headers = [
+      'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Origin: https://www.yeguodj.com',
+      'Referer: https://www.yeguodj.com/'
+    ].join('\r\n') + '\r\n';
+
+    res.set({
+      'Content-Type': 'video/mp4',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': '*',
+    });
+
+    if (isDownload) {
+      res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
+    } else {
+      res.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
+    }
+
+    const ffmpegArgs = [
+      '-headers', headers,
+      '-i', rawUrl,
+      '-c', 'copy',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+      '-f', 'mp4',
+      'pipe:1'
+    ];
+
+    const ffmpegProc = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    req.on('close', () => {
+      try {
+        ffmpegProc.kill('SIGKILL');
+      } catch {}
+    });
+
+    ffmpegProc.on('error', (err) => {
+      console.warn('[FFmpeg Stream Error]', err.message);
+      if (!res.headersSent) res.status(500).send('FFmpeg process error: ' + err.message);
+    });
+
+    ffmpegProc.stdout.pipe(res);
+  } catch (err) {
+    console.warn('[Stream Route Error]', err.message);
+    if (!res.headersSent) res.status(500).send(err.message);
+  }
+});
+
 // Image proxy: fetches covers server-side (no Referer) and converts HEIC -> JPEG,
 // because browsers cannot display HEIC.
 const imgCache = new Map();
@@ -661,6 +893,14 @@ app.get('/api/img', async (req, res) => {
       await acquire();
       try { body = Buffer.from(await convert({ buffer: body, format: 'JPEG', quality: 0.8 })); type = 'image/jpeg'; }
       finally { release(); }
+    } else if (body.length > 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) {
+      type = 'image/jpeg';
+    } else if (body.length > 8 && body[0] === 0x89 && body[1] === 0x50 && body[2] === 0x4e && body[3] === 0x47) {
+      type = 'image/png';
+    } else if (body.length > 6 && body[0] === 0x47 && body[1] === 0x49 && body[2] === 0x46) {
+      type = 'image/gif';
+    } else if (/\.(jpe?g|png|webp|gif)/i.test(u.pathname)) {
+      type = 'image/jpeg';
     } else if (!type.startsWith('image/')) {
       return res.status(404).send(`upstream not an image: ${type}`);
     }
