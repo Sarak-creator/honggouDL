@@ -1309,6 +1309,12 @@ function Detail({ series, onClose, lang }) {
           <p className="err">
             {error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage')
               ? `${t('apifyLimitTitle', lang)}: ${t('apifyLimitNotice', lang)}`
+              : error.includes('ENOENT')
+              ? (lang === 'km'
+                  ? '⚠️ ត្រូវការ Restart Server៖ សូមបិទ Terminal (ចុច Ctrl + C) រួចដំណើរការ "npm run dev" ម្តងទៀត ដើម្បីឱ្យ Server ស្គាល់ FFmpeg ដោយស្វ័យប្រវត្តិ។'
+                  : lang === 'zh-CN'
+                  ? '⚠️ 需要重启服务器：请在终端中按 Ctrl + C 停止，然后重新运行 npm run dev 即可使后台服务加载最新检测到的 FFmpeg。'
+                  : '⚠️ Server Restart Required: Please stop your terminal (Ctrl + C) and run "npm run dev" again so the backend loads the detected FFmpeg binary.')
               : error}
           </p>
         )}

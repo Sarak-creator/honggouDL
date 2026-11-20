@@ -6,7 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { Readable } from 'node:stream';
 
 dotenv.config();
@@ -649,28 +649,37 @@ app.get('/api/file', async (req, res) => {
 // ---- Yeguo (yeguodj.com) Downloader & Streaming Engine ------------------
 // Auto-detect FFmpeg binary path across Windows & UNIX environments
 function findFfmpeg() {
+  if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
+    return process.env.FFMPEG_PATH;
+  }
+  try {
+    const whereOut = execSync('where.exe ffmpeg', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const firstLine = whereOut.split(/[\r\n]+/)[0]?.trim();
+    if (firstLine && fs.existsSync(firstLine)) return firstLine;
+  } catch {}
+
   const possible = [
-    process.env.FFMPEG_PATH,
+    'C:\\Users\\user\\AppData\\Local\\Python\\bin\\ffmpeg.exe',
     path.join(process.env.LOCALAPPDATA || '', 'Python', 'bin', 'ffmpeg.exe'),
     path.join(process.env.USERPROFILE || '', 'AppData', 'Local', 'Python', 'bin', 'ffmpeg.exe'),
-    'C:\\Users\\user\\AppData\\Local\\Python\\bin\\ffmpeg.exe',
     path.join(process.env.PROGRAMFILES || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
     path.join(process.env['PROGRAMFILES(X86)'] || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
     'C:\\ffmpeg\\bin\\ffmpeg.exe',
   ].filter(Boolean);
 
   for (const p of possible) {
-    if (fs.existsSync(p)) {
-      const dir = path.dirname(p);
-      if (!process.env.PATH.includes(dir)) {
-        process.env.PATH = `${dir};${process.env.PATH}`;
-      }
-      return p;
-    }
+    if (fs.existsSync(p)) return p;
   }
   return 'ffmpeg';
 }
 const FFMPEG_BIN = findFfmpeg();
+if (fs.existsSync(FFMPEG_BIN)) {
+  const dir = path.dirname(FFMPEG_BIN);
+  if (!process.env.PATH.includes(dir)) {
+    process.env.PATH = `${dir};${process.env.PATH}`;
+  }
+}
+console.log(`[FFmpeg Engine] Detected binary: ${FFMPEG_BIN}`);
 
 const YEGUO_CONFIG = {
   key: '2acf7e91e9864673',
