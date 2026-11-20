@@ -604,9 +604,22 @@ app.get('/api/imgcheck', async (req, res) => {
       return res.json({ error: 'blocked url' });
     const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, redirect: 'follow' });
     const buf = Buffer.from(await r.arrayBuffer());
-    const type = r.headers.get('content-type') || '';
+    let type = r.headers.get('content-type') || '';
+    let isEncrypted = false;
+    let det = detectImageType(buf);
+    if (!det && !isHeic(buf)) {
+      const dec = decryptYeguoMedia(buf);
+      if (dec && detectImageType(dec)) {
+        isEncrypted = true;
+        det = detectImageType(dec);
+        type = det;
+      }
+    } else if (det) {
+      type = det;
+    }
     res.json({
       status: r.status, type, bytes: buf.length, host: u.hostname,
+      isEncrypted,
       ext: (u.pathname.match(/\.(\w+)$/) || [])[1] || null,
       preview: type.startsWith('image/') ? undefined : buf.subarray(0, 160).toString('utf8'),
     });
@@ -638,8 +651,32 @@ const YEGUO_CONFIG = {
   key: '2acf7e91e9864673',
   iv: '1c29882d3ddfcfd6',
   signKey: '5589d41f92a597d016b037ac37db243d',
+  mediaKey: 'f5d965df75336270',
+  mediaIv: '97b60394abc2fbe1',
   baseUrl: 'https://www.yeguodj.com/api.php',
 };
+
+function decryptYeguoMedia(buf) {
+  if (!buf || !Buffer.isBuffer(buf) || buf.length < 16) return null;
+  try {
+    const key = Buffer.from(YEGUO_CONFIG.mediaKey, 'utf8');
+    const iv = Buffer.from(YEGUO_CONFIG.mediaIv, 'utf8');
+    const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
+    decipher.setAutoPadding(true);
+    return Buffer.concat([decipher.update(buf), decipher.final()]);
+  } catch {
+    return null;
+  }
+}
+
+function detectImageType(buf) {
+  if (!buf || buf.length < 4) return null;
+  if (buf.length > 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length > 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  if (buf.length > 12 && buf.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  return null;
+}
 
 function decryptYeguoData(encryptedBase64) {
   if (!encryptedBase64 || typeof encryptedBase64 !== 'string') return null;
@@ -893,16 +930,26 @@ app.get('/api/img', async (req, res) => {
       await acquire();
       try { body = Buffer.from(await convert({ buffer: body, format: 'JPEG', quality: 0.8 })); type = 'image/jpeg'; }
       finally { release(); }
-    } else if (body.length > 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff) {
-      type = 'image/jpeg';
-    } else if (body.length > 8 && body[0] === 0x89 && body[1] === 0x50 && body[2] === 0x4e && body[3] === 0x47) {
-      type = 'image/png';
-    } else if (body.length > 6 && body[0] === 0x47 && body[1] === 0x49 && body[2] === 0x46) {
-      type = 'image/gif';
-    } else if (/\.(jpe?g|png|webp|gif)/i.test(u.pathname)) {
-      type = 'image/jpeg';
-    } else if (!type.startsWith('image/')) {
-      return res.status(404).send(`upstream not an image: ${type}`);
+    } else {
+      let det = detectImageType(body);
+      if (!det) {
+        // Attempt Yeguo media AES-CBC decryption
+        const decrypted = decryptYeguoMedia(body);
+        if (decrypted) {
+          const decType = detectImageType(decrypted);
+          if (decType) {
+            body = decrypted;
+            det = decType;
+          }
+        }
+      }
+      if (det) {
+        type = det;
+      } else if (/\.(jpe?g|png|webp|gif)/i.test(u.pathname)) {
+        type = 'image/jpeg';
+      } else if (!type.startsWith('image/')) {
+        return res.status(404).send(`upstream not an image: ${type}`);
+      }
     }
     const out = { type, body };
     if (imgCache.size > 600) imgCache.delete(imgCache.keys().next().value);
