@@ -51,8 +51,11 @@ function findCover(o, depth = 0) {
 
 // Covers may be HEIC or AES-encrypted Yeguo images; the server proxy decrypts & converts them.
 const variants = (src) => {
-  const proxied = `/api/img?u=${encodeURIComponent(src)}`;
-  return /\.hei[cf]/i.test(src) || /biacea\.cn|yeguodj|ygdj/i.test(src) ? [proxied] : [src, proxied];
+  const proxied = `/api/img?v=3&u=${encodeURIComponent(src)}`;
+  const proxiedFresh = `/api/img?v=3&fresh=1&u=${encodeURIComponent(src)}`;
+  return /\.hei[cf]/i.test(src) || /biacea\.cn|yeguodj|ygdj/i.test(src)
+    ? [proxied, proxiedFresh]
+    : [src, proxied, proxiedFresh];
 };
 function Cover({ src }) {
   const [stage, setStage] = useState(0);

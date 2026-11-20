@@ -919,13 +919,24 @@ app.get('/api/img', async (req, res) => {
       res.set({ 'Content-Type': type, 'Cache-Control': 'public, max-age=86400' });
       res.send(body);
     };
-    const hit = imgCache.get(u.href);
-    if (hit) return send(hit);
+    const isFresh = req.query.fresh === '1';
+    const cacheKey = u.href;
+    const hit = isFresh ? null : imgCache.get(cacheKey);
+    if (hit) {
+      if (detectImageType(hit.body)) {
+        res.set({ 'Content-Type': hit.type, 'Cache-Control': 'public, max-age=86400' });
+        return res.send(hit.body);
+      }
+      imgCache.delete(cacheKey);
+    }
 
     const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     let type = r.headers.get('content-type') || '';
     let body = Buffer.from(await r.arrayBuffer());
-    if (!r.ok) return res.status(404).send(`upstream ${r.status} ${type}`);
+    if (!r.ok) {
+      res.set({ 'Cache-Control': 'no-store' });
+      return res.status(404).send(`upstream ${r.status} ${type}`);
+    }
     if (isHeic(body) || /hei[cf]/i.test(type)) {
       await acquire();
       try { body = Buffer.from(await convert({ buffer: body, format: 'JPEG', quality: 0.8 })); type = 'image/jpeg'; }
@@ -945,17 +956,21 @@ app.get('/api/img', async (req, res) => {
       }
       if (det) {
         type = det;
-      } else if (/\.(jpe?g|png|webp|gif)/i.test(u.pathname)) {
-        type = 'image/jpeg';
-      } else if (!type.startsWith('image/')) {
+      } else {
+        // Neither raw nor decrypted buffer is a valid image; do not send corrupt bytes!
+        res.set({ 'Cache-Control': 'no-store' });
         return res.status(404).send(`upstream not an image: ${type}`);
       }
     }
     const out = { type, body };
     if (imgCache.size > 600) imgCache.delete(imgCache.keys().next().value);
-    imgCache.set(u.href, out);
-    send(out);
-  } catch (e) { res.status(502).send(String(e.message || e)); }
+    imgCache.set(cacheKey, out);
+    res.set({ 'Content-Type': type, 'Cache-Control': 'public, max-age=86400' });
+    res.send(body);
+  } catch (e) {
+    res.set({ 'Cache-Control': 'no-store' });
+    res.status(502).send(String(e.message || e));
+  }
 });
 
 app.use(express.static('dist'));
