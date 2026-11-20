@@ -808,7 +808,6 @@ function Detail({ series, onClose, lang }) {
     const a = document.createElement('a');
     a.href = url;
     a.setAttribute('download', filename);
-    a.setAttribute('target', '_blank');
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();

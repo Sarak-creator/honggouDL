@@ -866,15 +866,20 @@ app.get('/api/yeguo/stream', (req, res) => {
     });
 
     if (isDownload) {
-      res.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
+      res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}.mp4"; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
     } else {
-      res.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
+      res.set('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}.mp4"; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
     }
 
     const ffmpegArgs = [
       '-headers', headers,
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
       '-i', rawUrl,
       '-c', 'copy',
+      '-bsf:a', 'aac_adtstoasc',
       '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
       '-f', 'mp4',
       'pipe:1'
@@ -882,15 +887,29 @@ app.get('/api/yeguo/stream', (req, res) => {
 
     const ffmpegProc = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
 
+    let stderrData = '';
+    ffmpegProc.stderr.on('data', (d) => {
+      stderrData += d.toString('utf8');
+      if (stderrData.length > 2000) stderrData = stderrData.slice(-2000);
+    });
+
     req.on('close', () => {
       try {
-        ffmpegProc.kill('SIGKILL');
+        if (!ffmpegProc.killed) {
+          ffmpegProc.kill();
+        }
       } catch {}
     });
 
     ffmpegProc.on('error', (err) => {
       console.warn('[FFmpeg Stream Error]', err.message);
       if (!res.headersSent) res.status(500).send('FFmpeg process error: ' + err.message);
+    });
+
+    ffmpegProc.on('close', (code) => {
+      if (code !== 0 && code !== null) {
+        console.warn(`[FFmpeg Stream Warning] Exit code ${code}: ${stderrData.slice(-300)}`);
+      }
     });
 
     ffmpegProc.stdout.pipe(res);
