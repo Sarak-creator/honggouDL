@@ -653,7 +653,9 @@ function findFfmpeg() {
     return process.env.FFMPEG_PATH;
   }
   try {
-    const whereOut = execSync('where.exe ffmpeg', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? 'where.exe ffmpeg' : 'which ffmpeg';
+    const whereOut = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     const firstLine = whereOut.split(/[\r\n]+/)[0]?.trim();
     if (firstLine && fs.existsSync(firstLine)) return firstLine;
   } catch {}
@@ -665,21 +667,26 @@ function findFfmpeg() {
     path.join(process.env.PROGRAMFILES || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
     path.join(process.env['PROGRAMFILES(X86)'] || '', 'ffmpeg', 'bin', 'ffmpeg.exe'),
     'C:\\ffmpeg\\bin\\ffmpeg.exe',
+    '/usr/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
   ].filter(Boolean);
 
   for (const p of possible) {
     if (fs.existsSync(p)) return p;
   }
-  return 'ffmpeg';
+  return null;
 }
 const FFMPEG_BIN = findFfmpeg();
-if (fs.existsSync(FFMPEG_BIN)) {
+const hasFfmpeg = Boolean(FFMPEG_BIN && fs.existsSync(FFMPEG_BIN));
+if (hasFfmpeg) {
   const dir = path.dirname(FFMPEG_BIN);
   if (!process.env.PATH.includes(dir)) {
     process.env.PATH = `${dir};${process.env.PATH}`;
   }
+  console.log(`[FFmpeg Engine] Detected binary: ${FFMPEG_BIN}`);
+} else {
+  console.log('[FFmpeg Engine] No local FFmpeg binary found. Pure JavaScript HLS decryption active (Vercel Serverless Ready).');
 }
-console.log(`[FFmpeg Engine] Detected binary: ${FFMPEG_BIN}`);
 
 const YEGUO_CONFIG = {
   key: '2acf7e91e9864673',
@@ -871,6 +878,88 @@ app.get('/api/yeguo/series/:id', wrap(async ({ params }) => {
   }];
 }));
 
+// Pure JavaScript HLS Decryption and Streaming (No FFmpeg required, Vercel-ready)
+async function streamDecryptedHls(m3u8Url, res, fileName, isDownload) {
+  try {
+    const r = await fetch(m3u8Url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.yeguodj.com/',
+      }
+    });
+    if (!r.ok) {
+      if (!res.headersSent) res.status(r.status).send(`Failed to fetch playlist (${r.status})`);
+      return;
+    }
+    const text = await r.text();
+    const lines = text.split(/\r?\n/);
+    let keyBuf = null;
+    let ivBuf = null;
+    const segments = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('#EXT-X-KEY:')) {
+        const uriMatch = trimmed.match(/URI=["']([^"']+)["']/i);
+        const ivMatch = trimmed.match(/IV=0x([0-9a-fA-F]+)/i);
+        if (uriMatch) {
+          const keyUrl = new URL(uriMatch[1], m3u8Url).href;
+          const keyRes = await fetch(keyUrl);
+          if (keyRes.ok) {
+            keyBuf = Buffer.from(await keyRes.arrayBuffer());
+          }
+        }
+        if (ivMatch) {
+          ivBuf = Buffer.from(ivMatch[1], 'hex');
+        }
+      } else if (trimmed && !trimmed.startsWith('#')) {
+        segments.push(new URL(trimmed, m3u8Url).href);
+      }
+    }
+
+    if (!segments.length) {
+      if (!res.headersSent) res.status(404).send('No video segments found in playlist');
+      return;
+    }
+
+    res.set({
+      'Content-Type': 'video/mp4',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': '*',
+      'Content-Disposition': `${isDownload ? 'attachment' : 'inline'}; filename="${encodeURIComponent(fileName)}.mp4"; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`
+    });
+
+    for (let i = 0; i < segments.length; i++) {
+      if (res.writableEnded || res.closed) break;
+      const segUrl = segments[i];
+      const segRes = await fetch(segUrl);
+      if (!segRes.ok) continue;
+      const encBuf = Buffer.from(await segRes.arrayBuffer());
+      if (keyBuf) {
+        let segIv = ivBuf;
+        if (!segIv) {
+          segIv = Buffer.alloc(16);
+          segIv.writeUInt32BE(i, 12);
+        }
+        try {
+          const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, segIv);
+          decipher.setAutoPadding(true);
+          const dec = Buffer.concat([decipher.update(encBuf), decipher.final()]);
+          res.write(dec);
+        } catch {
+          res.write(encBuf);
+        }
+      } else {
+        res.write(encBuf);
+      }
+    }
+    res.end();
+  } catch (err) {
+    console.warn('[Pure JS HLS Stream Error]', err.message);
+    if (!res.headersSent) res.status(500).send('HLS stream error: ' + err.message);
+  }
+}
+
 // Streaming and Remuxing endpoint: converts HLS m3u8 stream to MP4 on-the-fly
 app.get('/api/yeguo/stream', async (req, res) => {
   try {
@@ -897,6 +986,11 @@ app.get('/api/yeguo/stream', async (req, res) => {
 
     const isDownload = req.query.download === '1' || req.query.download === 'true';
     const fileName = String(req.query.name || 'yeguo_video').replace(/[\\/:*?"<>|]/g, '_').slice(0, 100);
+
+    // If FFmpeg is NOT installed (e.g. on Vercel Serverless), stream decrypted HLS directly via pure JS
+    if (!hasFfmpeg) {
+      return await streamDecryptedHls(rawUrl, res, fileName, isDownload);
+    }
 
     const headers = [
       'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

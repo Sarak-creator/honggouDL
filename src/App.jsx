@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import AdBanner from './AdBanner';
 import { LANGUAGES, GENRES, t, getGenre } from './i18n';
 import { translateText, translateBatch } from './translateService';
+import { fetchAndDecryptHls } from './hlsDownloader';
 
 const PAGE_SIZE = 24;  // Reveal 24 dramas at a time
 const MAX = 1000;       // hard cap (server enforces too)
@@ -870,10 +871,28 @@ function Detail({ series, onClose, lang }) {
 
       if (item && item.videoUrl) {
         setStatusMessage(t('downloadingEp', lang, { ep: epLabel }));
-        const fileName = `${title} ${epLabel}`;
-        const url = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
-        triggerSingleFileDownload(url, `${fileName}.mp4`);
-        setDownloadedSet((prev) => new Set([...prev, id]));
+        const fileName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
+        const isYeguoHls = item.isYeguo || ep.isYeguo || series.isYeguo || item.videoUrl.includes('.m3u8');
+        if (isYeguoHls) {
+          try {
+            const blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
+              setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (${p.percent}%)`);
+            });
+            const blobUrl = URL.createObjectURL(blob);
+            triggerSingleFileDownload(blobUrl, `${fileName}.mp4`);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+            setDownloadedSet((prev) => new Set([...prev, id]));
+          } catch (err) {
+            console.warn(`Direct HLS download failed for ${epLabel}, falling back:`, err);
+            const url = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
+            triggerSingleFileDownload(url, `${fileName}.mp4`);
+            setDownloadedSet((prev) => new Set([...prev, id]));
+          }
+        } else {
+          const url = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
+          triggerSingleFileDownload(url, `${fileName}.mp4`);
+          setDownloadedSet((prev) => new Set([...prev, id]));
+        }
         await new Promise((r) => setTimeout(r, 1200));
       } else {
         console.warn(`Could not download ${epLabel}`);
@@ -973,13 +992,23 @@ function Detail({ series, onClose, lang }) {
         if (cancelDownloadRef.current) break;
 
         if (item && item.videoUrl) {
-          const downloadUrl = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
-          const res = await fetch(downloadUrl);
-          if (!res.ok) {
-            const errBody = await res.text().catch(() => '');
-            throw new Error(`Failed to fetch ${epLabel} (${res.status})${errBody ? `: ${errBody}` : ''}`);
+          const isYeguoHls = item.isYeguo || ep.isYeguo || series.isYeguo || item.videoUrl.includes('.m3u8');
+          let blob;
+          if (isYeguoHls) {
+            blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
+              setStatusMessage(
+                `${t('zipFetching', lang, { ep: epLabel, current: i + 1, total: targetList.length })} (${p.percent}%)`
+              );
+            });
+          } else {
+            const downloadUrl = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
+            const res = await fetch(downloadUrl);
+            if (!res.ok) {
+              const errBody = await res.text().catch(() => '');
+              throw new Error(`Failed to fetch ${epLabel} (${res.status})${errBody ? `: ${errBody}` : ''}`);
+            }
+            blob = await res.blob();
           }
-          const blob = await res.blob();
           const cleanEpName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
           folder.file(`${cleanEpName}.mp4`, blob);
           setDownloadedSet((prev) => new Set([...prev, id]));
@@ -1020,6 +1049,30 @@ function Detail({ series, onClose, lang }) {
     }
   };
 
+  const handleSingleEpisodeDownload = async (e, ep, item, idx) => {
+    const isYeguoHls = item?.isYeguo || ep?.isYeguo || series.isYeguo || item?.videoUrl?.includes('.m3u8');
+    if (!isYeguoHls) return;
+    e.preventDefault();
+    const epIndex = idx >= 0 ? idx : eps.indexOf(ep);
+    const epLabel = label(ep, epIndex);
+    const fileName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
+    try {
+      setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (0%)`);
+      const blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
+        setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (${p.percent}%)`);
+      });
+      const blobUrl = URL.createObjectURL(blob);
+      triggerSingleFileDownload(blobUrl, `${fileName}.mp4`);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      setDownloadedSet((prev) => new Set([...prev, String(ep.videoId)]));
+      setStatusMessage('');
+    } catch (err) {
+      console.warn('Single episode client download error, falling back:', err);
+      window.open(fileUrl(item, ep, epIndex), '_blank');
+      setStatusMessage('');
+    }
+  };
+
   return (
     <div className="overlay" onClick={onClose}>
       <section className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1031,7 +1084,7 @@ function Detail({ series, onClose, lang }) {
               controls autoPlay playsInline onEnded={playNext} />
             <p className="row">
               <strong>{title} · {label(playing.ep, eps.indexOf(playing.ep))}</strong>
-              <a className="btn" href={fileUrl(playing.item, playing.ep, eps.indexOf(playing.ep))}>{t('download', lang)}</a>
+              <a className="btn" href={fileUrl(playing.item, playing.ep, eps.indexOf(playing.ep))} onClick={(e) => handleSingleEpisodeDownload(e, playing.ep, playing.item, eps.indexOf(playing.ep))}>{t('download', lang)}</a>
               {nextReady && <button className="mini" onClick={playNext}>{t('nextEp', lang)}</button>}
               <button className="mini alt" onClick={() => setPlaying(null)}>{t('closePlayer', lang)}</button>
             </p>
@@ -1309,12 +1362,6 @@ function Detail({ series, onClose, lang }) {
           <p className="err">
             {error.includes('hard limit') || error.includes('403') || error.includes('Monthly usage')
               ? `${t('apifyLimitTitle', lang)}: ${t('apifyLimitNotice', lang)}`
-              : error.includes('ENOENT')
-              ? (lang === 'km'
-                  ? '⚠️ ត្រូវការ Restart Server៖ សូមបិទ Terminal (ចុច Ctrl + C) រួចដំណើរការ "npm run dev" ម្តងទៀត ដើម្បីឱ្យ Server ស្គាល់ FFmpeg ដោយស្វ័យប្រវត្តិ។'
-                  : lang === 'zh-CN'
-                  ? '⚠️ 需要重启服务器：请在终端中按 Ctrl + C 停止，然后重新运行 npm run dev 即可使后台服务加载最新检测到的 FFmpeg。'
-                  : '⚠️ Server Restart Required: Please stop your terminal (Ctrl + C) and run "npm run dev" again so the backend loads the detected FFmpeg binary.')
               : error}
           </p>
         )}
@@ -1343,7 +1390,7 @@ function Detail({ series, onClose, lang }) {
                 ) : r ? (
                   <div className="row">
                     <button className="mini" onClick={() => setPlaying({ ep, item: r })}>▶</button>
-                    <a className="mini btn" href={fileUrl(r, ep, n)} title={t('download', lang)}>⬇</a>
+                    <a className="mini btn" href={fileUrl(r, ep, n)} onClick={(e) => handleSingleEpisodeDownload(e, ep, r, n)} title={t('download', lang)}>⬇</a>
                   </div>
                 ) : pending[id] ? (
                   <small className="ep-status-pill pending">⏳ {t('preparing', lang)}</small>
