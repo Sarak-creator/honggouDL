@@ -4,6 +4,7 @@ import AdBanner from './AdBanner';
 import { LANGUAGES, GENRES, t, getGenre } from './i18n';
 import { translateText, translateBatch } from './translateService';
 import { fetchAndDecryptHls } from './hlsDownloader';
+import VideoPlayer from './VideoPlayer';
 
 const PAGE_SIZE = 24;  // Reveal 24 dramas at a time
 const MAX = 1000;       // hard cap (server enforces too)
@@ -1080,8 +1081,13 @@ function Detail({ series, onClose, lang }) {
 
         {playing && (
           <div className="player">
-            <video key={playing.item.playUrl || playing.item.videoUrl} src={playing.item.playUrl || playing.item.videoUrl} poster={findCover(playing.ep) || cover}
-              controls autoPlay playsInline onEnded={playNext} />
+            <VideoPlayer
+              key={playing.item.videoId || playing.item.videoUrl}
+              src={playing.item.videoUrl || playing.item.playUrl}
+              poster={findCover(playing.ep) || cover}
+              autoPlay={true}
+              onEnded={playNext}
+            />
             <p className="row">
               <strong>{title} · {label(playing.ep, eps.indexOf(playing.ep))}</strong>
               <a className="btn" href={fileUrl(playing.item, playing.ep, eps.indexOf(playing.ep))} onClick={(e) => handleSingleEpisodeDownload(e, playing.ep, playing.item, eps.indexOf(playing.ep))}>{t('download', lang)}</a>

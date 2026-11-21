@@ -852,7 +852,7 @@ app.get('/api/yeguo/series/:id', wrap(async ({ params }) => {
       title: epTitle,
       duration: ep.duration || ep.episode_duration || 0,
       videoUrl: vUrl,
-      playUrl: `/api/yeguo/stream?videoId=${videoId}&episodeId=${epId}${vUrl ? `&url=${encodeURIComponent(vUrl)}` : ''}`,
+      playUrl: vUrl || `/api/yeguo/stream?videoId=${videoId}&episodeId=${epId}`,
       downloadUrl: `/api/yeguo/stream?videoId=${videoId}&episodeId=${epId}&download=1&name=${encodeURIComponent(safeTitle)}${vUrl ? `&url=${encodeURIComponent(vUrl)}` : ''}`,
       isYeguo: true,
       platform: 'yeguo',
@@ -876,6 +876,23 @@ app.get('/api/yeguo/series/:id', wrap(async ({ params }) => {
     },
     episodes: mappedEpisodes,
   }];
+}));
+
+// Fetch fresh stream url for a single episode on demand
+app.get('/api/yeguo/play', wrap(async ({ query }) => {
+  const videoId = String(query.videoId || '');
+  const episodeId = String(query.episodeId || '');
+  if (!videoId) throw new Error('Missing videoId');
+  const play = await callYeguoApi('/api/playlet/play', {
+    video_id: videoId,
+    episode_id: episodeId || undefined,
+  });
+  return {
+    success: true,
+    videoId,
+    episodeId,
+    videoUrl: play?.video_url || '',
+  };
 }));
 
 // Pure JavaScript HLS Decryption and Streaming (No FFmpeg required, Vercel-ready)
