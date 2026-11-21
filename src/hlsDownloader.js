@@ -62,11 +62,20 @@ export async function fetchAndDecryptHls(m3u8Url, onProgress = () => {}, signal 
     throw new Error('No video segments found in playlist');
   }
 
-  const CONCURRENCY = 4;
+  // 6 parallel connections offers the fastest throughput without saturating mobile connections
+  const CONCURRENCY = 6;
   const decryptedChunks = new Array(segments.length);
   let completed = 0;
+  let totalBytes = 0;
+  const startTime = Date.now();
 
-  onProgress({ current: 0, total: segments.length, percent: 0 });
+  onProgress({
+    current: 0,
+    total: segments.length,
+    percent: 0,
+    speedMBs: '0.0',
+    loadedMB: '0.0',
+  });
 
   async function processSegment(idx) {
     if (signal?.aborted) throw new Error('Download aborted');
@@ -88,15 +97,23 @@ export async function fetchAndDecryptHls(m3u8Url, onProgress = () => {}, signal 
         encBuf
       );
       decryptedChunks[idx] = dec;
+      totalBytes += dec.byteLength;
     } else {
       decryptedChunks[idx] = encBuf;
+      totalBytes += encBuf.byteLength;
     }
 
     completed++;
+    const elapsedSec = Math.max(0.2, (Date.now() - startTime) / 1000);
+    const speedMBs = ((totalBytes / (1024 * 1024)) / elapsedSec).toFixed(1);
+    const loadedMB = (totalBytes / (1024 * 1024)).toFixed(1);
+
     onProgress({
       current: completed,
       total: segments.length,
       percent: Math.round((completed / segments.length) * 100),
+      speedMBs,
+      loadedMB,
     });
   }
 

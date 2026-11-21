@@ -946,28 +946,37 @@ async function streamDecryptedHls(m3u8Url, res, fileName, isDownload) {
       'Content-Disposition': `${isDownload ? 'attachment' : 'inline'}; filename="${encodeURIComponent(fileName)}.mp4"; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`
     });
 
-    for (let i = 0; i < segments.length; i++) {
+    const BATCH_SIZE = 6;
+    for (let i = 0; i < segments.length; i += BATCH_SIZE) {
       if (res.writableEnded || res.closed) break;
-      const segUrl = segments[i];
-      const segRes = await fetch(segUrl);
-      if (!segRes.ok) continue;
-      const encBuf = Buffer.from(await segRes.arrayBuffer());
-      if (keyBuf) {
-        let segIv = ivBuf;
-        if (!segIv) {
-          segIv = Buffer.alloc(16);
-          segIv.writeUInt32BE(i, 12);
-        }
+      const batchUrls = segments.slice(i, i + BATCH_SIZE);
+      const batchPromises = batchUrls.map(async (segUrl, bIdx) => {
+        const segIdx = i + bIdx;
         try {
-          const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, segIv);
-          decipher.setAutoPadding(true);
-          const dec = Buffer.concat([decipher.update(encBuf), decipher.final()]);
-          res.write(dec);
+          const segRes = await fetch(segUrl);
+          if (!segRes.ok) return null;
+          const encBuf = Buffer.from(await segRes.arrayBuffer());
+          if (keyBuf) {
+            let segIv = ivBuf;
+            if (!segIv) {
+              segIv = Buffer.alloc(16);
+              segIv.writeUInt32BE(segIdx, 12);
+            }
+            const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, segIv);
+            decipher.setAutoPadding(true);
+            return Buffer.concat([decipher.update(encBuf), decipher.final()]);
+          }
+          return encBuf;
         } catch {
-          res.write(encBuf);
+          return null;
         }
-      } else {
-        res.write(encBuf);
+      });
+
+      const batchChunks = await Promise.all(batchPromises);
+      for (const chunk of batchChunks) {
+        if (chunk && !res.writableEnded && !res.closed) {
+          res.write(chunk);
+        }
       }
     }
     res.end();

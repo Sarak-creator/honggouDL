@@ -653,6 +653,7 @@ function Detail({ series, onClose, lang }) {
   const [downloadedSet, setDownloadedSet] = useState(() => new Set());
   const [statusMessage, setStatusMessage] = useState('');
   const [copiedLinks, setCopiedLinks] = useState(false);
+  const [downloadingEps, setDownloadingEps] = useState({});
 
   // ZIP packaging states
   const [isZipping, setIsZipping] = useState(false);
@@ -876,8 +877,10 @@ function Detail({ series, onClose, lang }) {
         const isYeguoHls = item.isYeguo || ep.isYeguo || series.isYeguo || item.videoUrl.includes('.m3u8');
         if (isYeguoHls) {
           try {
+            setDownloadingEps((prev) => ({ ...prev, [id]: { percent: 0, speed: '0.0' } }));
             const blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
-              setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (${p.percent}%)`);
+              setDownloadingEps((prev) => ({ ...prev, [id]: { percent: p.percent, speed: p.speedMBs } }));
+              setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (${p.percent}% · ${p.speedMBs} MB/s)`);
             });
             const blobUrl = URL.createObjectURL(blob);
             triggerSingleFileDownload(blobUrl, `${fileName}.mp4`);
@@ -888,13 +891,19 @@ function Detail({ series, onClose, lang }) {
             const url = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
             triggerSingleFileDownload(url, `${fileName}.mp4`);
             setDownloadedSet((prev) => new Set([...prev, id]));
+          } finally {
+            setDownloadingEps((prev) => {
+              const next = { ...prev };
+              delete next[id];
+              return next;
+            });
           }
         } else {
           const url = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
           triggerSingleFileDownload(url, `${fileName}.mp4`);
           setDownloadedSet((prev) => new Set([...prev, id]));
         }
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise((r) => setTimeout(r, 150));
       } else {
         console.warn(`Could not download ${epLabel}`);
       }
@@ -970,53 +979,66 @@ function Detail({ series, onClose, lang }) {
       const cleanFolderName = folderName.replace(/[\\/:*?"<>|]/g, '_').trim();
       const folder = zip.folder(cleanFolderName) || zip;
 
-      for (let i = 0; i < targetList.length; i++) {
-        if (cancelDownloadRef.current) break;
+      let completedCount = 0;
+      let nextIndex = 0;
 
-        const ep = targetList[i];
-        const id = String(ep.videoId);
-        const epIndex = eps.indexOf(ep);
-        const epLabel = label(ep, epIndex >= 0 ? epIndex : i);
+      // 2 parallel workers to download episodes concurrently into zip
+      async function downloadWorker() {
+        while (nextIndex < targetList.length) {
+          if (cancelDownloadRef.current) break;
+          const idx = nextIndex++;
+          const ep = targetList[idx];
+          const id = String(ep.videoId);
+          const epIndex = eps.indexOf(ep);
+          const epLabel = label(ep, epIndex >= 0 ? epIndex : idx);
 
-        setZipProgress({
-          current: i + 1,
-          total: targetList.length,
-          percent: Math.round(((i) / targetList.length) * 100),
-        });
-        setStatusMessage(t('zipFetching', lang, { ep: epLabel, current: i + 1, total: targetList.length }));
+          let item = readyRef.current[id];
+          if (!item || !item.videoUrl) {
+            item = await waitForReady(id);
+          }
+          if (cancelDownloadRef.current || !item?.videoUrl) continue;
 
-        let item = readyRef.current[id];
-        if (!item || !item.videoUrl) {
-          item = await waitForReady(id);
-        }
-
-        if (cancelDownloadRef.current) break;
-
-        if (item && item.videoUrl) {
+          setDownloadingEps((prev) => ({ ...prev, [id]: { percent: 0, speed: '0.0' } }));
           const isYeguoHls = item.isYeguo || ep.isYeguo || series.isYeguo || item.videoUrl.includes('.m3u8');
           let blob;
-          if (isYeguoHls) {
-            blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
-              setStatusMessage(
-                `${t('zipFetching', lang, { ep: epLabel, current: i + 1, total: targetList.length })} (${p.percent}%)`
-              );
-            });
-          } else {
-            const downloadUrl = fileUrl(item, ep, epIndex >= 0 ? epIndex : i);
-            const res = await fetch(downloadUrl);
-            if (!res.ok) {
-              const errBody = await res.text().catch(() => '');
-              throw new Error(`Failed to fetch ${epLabel} (${res.status})${errBody ? `: ${errBody}` : ''}`);
+          try {
+            if (isYeguoHls) {
+              blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
+                setDownloadingEps((prev) => ({ ...prev, [id]: { percent: p.percent, speed: p.speedMBs } }));
+                setStatusMessage(
+                  `${t('zipFetching', lang, { ep: epLabel, current: completedCount + 1, total: targetList.length })} (${p.percent}% · ${p.speedMBs} MB/s)`
+                );
+              });
+            } else {
+              const downloadUrl = fileUrl(item, ep, epIndex >= 0 ? epIndex : idx);
+              const res = await fetch(downloadUrl);
+              if (!res.ok) throw new Error(`Failed to fetch ${epLabel}`);
+              blob = await res.blob();
             }
-            blob = await res.blob();
+
+            const cleanEpName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
+            folder.file(`${cleanEpName}.mp4`, blob);
+            completedCount++;
+            setDownloadedSet((prev) => new Set([...prev, id]));
+            setZipProgress({
+              current: completedCount,
+              total: targetList.length,
+              percent: Math.round((completedCount / targetList.length) * 100),
+            });
+          } catch (err) {
+            console.warn(`Failed adding ${epLabel} to zip:`, err);
+          } finally {
+            setDownloadingEps((prev) => {
+              const next = { ...prev };
+              delete next[id];
+              return next;
+            });
           }
-          const cleanEpName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
-          folder.file(`${cleanEpName}.mp4`, blob);
-          setDownloadedSet((prev) => new Set([...prev, id]));
-        } else {
-          console.warn(`Could not add ${epLabel} to zip`);
         }
       }
+
+      const workers = Array.from({ length: Math.min(2, targetList.length) }, () => downloadWorker());
+      await Promise.all(workers);
 
       if (!cancelDownloadRef.current) {
         setStatusMessage(t('zipCompressing', lang));
@@ -1057,20 +1079,30 @@ function Detail({ series, onClose, lang }) {
     const epIndex = idx >= 0 ? idx : eps.indexOf(ep);
     const epLabel = label(ep, epIndex);
     const fileName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
+    const id = String(ep.videoId);
+
     try {
+      setDownloadingEps((prev) => ({ ...prev, [id]: { percent: 0, speed: '0.0' } }));
       setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (0%)`);
       const blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
-        setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (${p.percent}%)`);
+        setDownloadingEps((prev) => ({ ...prev, [id]: { percent: p.percent, speed: p.speedMBs } }));
+        setStatusMessage(`${t('downloadingEp', lang, { ep: epLabel })} (${p.percent}% · ${p.speedMBs} MB/s)`);
       });
       const blobUrl = URL.createObjectURL(blob);
       triggerSingleFileDownload(blobUrl, `${fileName}.mp4`);
       setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
-      setDownloadedSet((prev) => new Set([...prev, String(ep.videoId)]));
+      setDownloadedSet((prev) => new Set([...prev, id]));
       setStatusMessage('');
     } catch (err) {
       console.warn('Single episode client download error, falling back:', err);
       window.open(fileUrl(item, ep, epIndex), '_blank');
       setStatusMessage('');
+    } finally {
+      setDownloadingEps((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     }
   };
 
@@ -1377,7 +1409,8 @@ function Detail({ series, onClose, lang }) {
             const id = String(ep.videoId);
             const r = ready[id];
             const isDownloaded = downloadedSet.has(id);
-            const isCurrentlyDownloading = isDownloading && downloadQueue[downloadIndex]?.videoId === ep.videoId;
+            const epProgress = downloadingEps[id];
+            const isCurrentlyDownloading = epProgress || (isDownloading && downloadQueue[downloadIndex]?.videoId === ep.videoId);
 
             return (
               <div key={id} className={'ep' + (sel.has(id) ? ' sel' : '') + (isDownloaded ? ' downloaded' : '')}>
@@ -1386,7 +1419,11 @@ function Detail({ series, onClose, lang }) {
                   {isDownloaded && <span className="downloaded-badge">✓</span>}
                 </div>
                 <span>{label(ep, n)}{ep.duration ? ` · ${Math.round(ep.duration)}s` : ''}</span>
-                {isCurrentlyDownloading ? (
+                {epProgress ? (
+                  <span className="ep-status-pill downloading" style={{ minWidth: '78px', textAlign: 'center', fontWeight: 'bold' }}>
+                    📥 {epProgress.percent}% ({epProgress.speed || '0'}MB/s)
+                  </span>
+                ) : isCurrentlyDownloading ? (
                   <span className="ep-status-pill downloading">📥 {t('downloading', lang) || 'Downloading…'}</span>
                 ) : isDownloaded ? (
                   <div className="row">
