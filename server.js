@@ -1497,6 +1497,19 @@ function extractAacFromTs(tsBuf, audioPid = 257) {
   return Buffer.concat(aacFrames);
 }
 
+async function mapConcurrent(items, limit, fn) {
+  const results = new Array(items.length);
+  let cur = 0;
+  const workers = new Array(Math.min(items.length, limit)).fill(0).map(async () => {
+    while (cur < items.length) {
+      const idx = cur++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function extractAacFromHls(m3u8Url) {
   const r = await fetch(m3u8Url, {
     signal: AbortSignal.timeout(8000),
@@ -1532,39 +1545,35 @@ async function extractAacFromHls(m3u8Url) {
 
   let audioPid = null;
   const aacChunks = [];
-  const BATCH_SIZE = 25;
+  const CONCURRENCY = 40;
 
-  for (let i = 0; i < segments.length; i += BATCH_SIZE) {
-    const batchUrls = segments.slice(i, i + BATCH_SIZE);
-    const batchDecrypted = await Promise.all(batchUrls.map(async (segUrl, bIdx) => {
-      const segIdx = i + bIdx;
-      try {
-        const segRes = await fetch(segUrl, { signal: AbortSignal.timeout(8000) });
-        if (!segRes.ok) return null;
-        let buf = Buffer.from(await segRes.arrayBuffer());
-        if (keyBuf) {
-          let segIv = ivBuf;
-          if (!segIv) {
-            segIv = Buffer.alloc(16);
-            segIv.writeUInt32BE(segIdx, 12);
-          }
-          const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, segIv);
-          decipher.setAutoPadding(true);
-          buf = Buffer.concat([decipher.update(buf), decipher.final()]);
+  const decryptedSegments = await mapConcurrent(segments, CONCURRENCY, async (segUrl, segIdx) => {
+    try {
+      const segRes = await fetch(segUrl, { signal: AbortSignal.timeout(8000) });
+      if (!segRes.ok) return null;
+      let buf = Buffer.from(await segRes.arrayBuffer());
+      if (keyBuf) {
+        let segIv = ivBuf;
+        if (!segIv) {
+          segIv = Buffer.alloc(16);
+          segIv.writeUInt32BE(segIdx, 12);
         }
-        return buf;
-      } catch (err) {
-        console.warn(`[extractAacFromHls] segment ${segIdx} error:`, err.message);
-        return null;
+        const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, segIv);
+        decipher.setAutoPadding(true);
+        buf = Buffer.concat([decipher.update(buf), decipher.final()]);
       }
-    }));
-
-    for (const tsBuf of batchDecrypted) {
-      if (!tsBuf || tsBuf.length < 188) continue;
-      if (audioPid === null) audioPid = findAudioPid(tsBuf);
-      const aac = extractAacFromTs(tsBuf, audioPid);
-      if (aac && aac.length) aacChunks.push(aac);
+      return buf;
+    } catch (err) {
+      console.warn(`[extractAacFromHls] segment ${segIdx} error:`, err.message);
+      return null;
     }
+  });
+
+  for (const tsBuf of decryptedSegments) {
+    if (!tsBuf || tsBuf.length < 188) continue;
+    if (audioPid === null) audioPid = findAudioPid(tsBuf);
+    const aac = extractAacFromTs(tsBuf, audioPid);
+    if (aac && aac.length) aacChunks.push(aac);
   }
 
   const finalAac = Buffer.concat(aacChunks);
@@ -1677,68 +1686,72 @@ app.post('/api/subtitles/generate', wrap(async ({ body }) => {
     }
   }
 
-  const systemInstructionText = `You are an expert film dubbing translator and subtitler specializing in translating foreign films and Chinese short dramas into authentic, natural, colloquial spoken Khmer subtitles (ភាសាខ្មែរសម្រាប់រឿងភាគខ្លី).
-
+  const systemInstructionText = `You are a film subtitler translating Chinese short drama dialogue into natural spoken Khmer subtitles (ភាសាខ្មែរសម្រាប់រឿងភាគខ្លី).
 RULES:
-1. Listen carefully to the spoken dialogue in this audio.
-2. Transcribe and translate all dialogue into authentic, natural, dramatic spoken Khmer (100% Khmer text).
-3. DO NOT leave any untranslated Chinese characters or foreign words inside the Khmer translation.
-4. Translate idioms, exclamations, and emotions accurately with dramatic depth (e.g. "放肆" -> "ព្រហើនណាស់!", "慢着" -> "ចាំបន្តិច!").
-5. Provide accurate timestamps (start, end) in seconds (numbers, e.g. 1.2, 4.5) or MM:SS.sss relative to this audio.
-6. In "original", include the transcribed original Chinese sentence.
+1. Transcribe spoken dialogue and translate 100% into authentic, natural spoken Khmer.
+2. Provide exact timestamps (start, end) in seconds.
+3. Original Chinese sentence in "original".
+4. Output ONLY valid JSON array: [{ "start": 1.2, "end": 3.8, "text": "...", "original": "..." }]`;
 
-Return ONLY a valid JSON array of objects:
-[
-  { "start": 1.2, "end": 3.8, "text": "តើឯងគិតថាឯងជានរណា?", "original": "你以为你是谁？" }
-]`;
-
-  const payload = {
-    systemInstruction: {
-      parts: [{ text: systemInstructionText }]
-    },
-    contents: [
-      {
-        role: "user",
-        parts: [
-          {
-            inlineData: {
-              mimeType: mediaMimeType,
-              data: mediaBase64
-            }
-          },
-          {
-            text: "Transcribe the spoken drama dialogue and translate it into authentic, natural spoken Khmer subtitles with exact timestamps. Return only a valid JSON array."
-          }
-        ]
-      }
-    ],
-    generationConfig: {
+  const buildPayload = (useMinimalThinking = true) => {
+    const config = {
       responseMimeType: "application/json",
-      maxOutputTokens: 8192
+      maxOutputTokens: 8192,
+    };
+    if (useMinimalThinking) {
+      config.thinkingConfig = { thinkingLevel: "minimal" };
     }
+    return {
+      systemInstruction: {
+        parts: [{ text: systemInstructionText }]
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              inlineData: {
+                mimeType: mediaMimeType,
+                data: mediaBase64
+              }
+            },
+            {
+              text: "Transcribe spoken dialogue into Khmer subtitles with timestamps in JSON array."
+            }
+          ]
+        }
+      ],
+      generationConfig: config
+    };
   };
 
-  // Dynamically fetch available models from Google AI Studio if possible
+  // Cache available dynamic models in memory for 15 minutes to save 1-2.5s on each request
   let dynamicModels = [];
-  try {
-    const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, {
-      signal: AbortSignal.timeout(4000)
-    });
-    if (listRes.ok) {
-      const listData = await listRes.json();
-      if (Array.isArray(listData.models)) {
-        dynamicModels = listData.models
-          .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
-          .map((m) => m.name.replace(/^models\//, ''));
+  if (global._geminiModelsCache && Date.now() - global._geminiModelsCacheTime < 15 * 60 * 1000) {
+    dynamicModels = global._geminiModelsCache;
+  } else {
+    try {
+      const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, {
+        signal: AbortSignal.timeout(2000)
+      });
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        if (Array.isArray(listData.models)) {
+          dynamicModels = listData.models
+            .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+            .map((m) => m.name.replace(/^models\//, ''));
+          global._geminiModelsCache = dynamicModels;
+          global._geminiModelsCacheTime = Date.now();
+        }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   const priorityList = [
-    requestedModel,
-    'gemini-3.8-flash',
     'gemini-3.5-flash-lite',
+    'gemini-3.8-flash',
     'gemini-3.5-flash',
+    requestedModel,
     'gemini-3.8-pro',
   ];
 
@@ -1755,7 +1768,7 @@ Return ONLY a valid JSON array of objects:
     )
   ].filter((v, i, a) => v && a.indexOf(v) === i);
 
-  console.log('[Subtitle AI] Models queue:', modelsToTry);
+  console.log('[Subtitle AI] Ultra-Fast Models queue:', modelsToTry);
 
   let rawJson = null;
   const modelErrors = [];
@@ -1765,23 +1778,40 @@ Return ONLY a valid JSON array of objects:
     const isLastModel = idx === modelsToTry.length - 1;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const resp = await fetch(url, {
+      
+      // Try first with thinkingLevel: "minimal" for instantaneous token output
+      let resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(buildPayload(true)),
         signal: AbortSignal.timeout(28000)
       });
+
+      // If model does not support thinkingConfig (400 error), immediately fallback without thinkingConfig
+      if (!resp.ok && resp.status === 400) {
+        const errJson = await resp.clone().json().catch(() => ({}));
+        const errDetail = errJson.error?.message || '';
+        if (errDetail.includes('thinkingConfig') || errDetail.includes('thinkingLevel') || errDetail.includes('Unknown field')) {
+          resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(buildPayload(false)),
+            signal: AbortSignal.timeout(28000)
+          });
+        }
+      }
+
       if (!resp.ok) {
         const errJson = await resp.json().catch(() => ({}));
         const errMsg = errJson.error?.message || resp.statusText;
-        // If temporary high-demand and it is the last model available, retry once after 1.5s
+        // If temporary high-demand and it is the last model available, retry once after 1s
         if (isLastModel && (resp.status === 503 || resp.status === 429 || errMsg.includes('high demand') || errMsg.includes('temporary'))) {
-          console.warn(`[Subtitle AI] Final model ${model} high demand (${errMsg}), retrying once in 1.5s...`);
-          await new Promise((r) => setTimeout(r, 1500));
+          console.warn(`[Subtitle AI] Final model ${model} high demand (${errMsg}), retrying once in 1s...`);
+          await new Promise((r) => setTimeout(r, 1000));
           const retryResp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify(buildPayload(false)),
             signal: AbortSignal.timeout(28000)
           });
           if (retryResp.ok) {

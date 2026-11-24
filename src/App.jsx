@@ -1116,6 +1116,54 @@ function Detail({ series, onClose, lang }) {
   const nextReady = playing && eps.slice(eps.indexOf(playing.ep) + 1).find((e) => ready[String(e.videoId)]);
   const playNext = () => nextReady && setPlaying({ ep: nextReady, item: ready[String(nextReady.videoId)] });
 
+  // Ultra-Fast Next-Episode Subtitle Pre-generation:
+  // When current episode has subtitles and is actively playing, quietly pre-generate
+  // the next episode's subtitles in the background so "Next Episode ▶" loads with 0ms wait!
+  useEffect(() => {
+    if (!playing || !currentVideoId || !currentSubtitles.length) return;
+    const key = (geminiApiKey || localStorage.getItem('hg_gemini_api_key') || '').trim();
+    if (!key) return;
+
+    const curIndex = eps.indexOf(playing.ep);
+    if (curIndex < 0 || curIndex + 1 >= eps.length) return;
+    const nextEp = eps[curIndex + 1];
+    const nextId = String(nextEp.videoId);
+
+    if (subtitlesMap[nextId] || autoGenAttemptedRef.current.has(nextId)) return;
+
+    const nextItem = ready[nextId];
+    const nextVUrl = nextItem?.videoUrl || nextItem?.playUrl;
+    if (!nextVUrl) return;
+
+    // After 2.5s of current playback, quietly trigger next episode subtitle generation
+    const timer = setTimeout(() => {
+      autoGenAttemptedRef.current.add(nextId);
+      api(`/api/subtitles/${nextId}`)
+        .then((res) => {
+          if (res.success && Array.isArray(res.subtitles) && res.subtitles.length > 0) {
+            setSubtitlesMap((prev) => ({ ...prev, [nextId]: res.subtitles }));
+          } else {
+            api('/api/subtitles/generate', {
+              videoId: nextId,
+              videoUrl: nextVUrl,
+              apiKey: key,
+              seriesTitle: title,
+              episodeNum: String(nextEp.episodeIndex ?? curIndex + 2),
+            })
+              .then((genRes) => {
+                if (genRes.success && Array.isArray(genRes.subtitles)) {
+                  setSubtitlesMap((prev) => ({ ...prev, [nextId]: genRes.subtitles }));
+                }
+              })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 2500);
+
+    return () => clearTimeout(timer);
+  }, [playing, currentVideoId, currentSubtitles.length, ready, eps, geminiApiKey, title, subtitlesMap]);
+
   const triggerSingleFileDownload = (url, filename) => {
     const a = document.createElement('a');
     a.href = url;
