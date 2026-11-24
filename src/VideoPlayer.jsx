@@ -210,6 +210,8 @@ export default function VideoPlayer({
           maxHeight: '65vh',
           display: 'block',
           background: '#000',
+          margin: '0 auto',
+          objectFit: 'contain',
         }}
       >
         {vttBlobUrl && (

@@ -61,8 +61,12 @@
     box-sizing: border-box;
 }
 
+html,
 body {
     margin: 0;
+    padding: 0;
+    max-width: 100%;
+    overflow-x: hidden;
     background: var(--bg);
     color: var(--fg);
     font-family: 'Kantumruy Pro', 'Kantumruy', system-ui, -apple-system, sans-serif;
@@ -231,7 +235,7 @@ main {
     color: var(--acc) !important;
 }
 
-/* Platform Switcher (Hongguo vs Yeguo) */
+/* Platform Switcher (Hongguo vs Yeguo vs Huangguo) */
 .platform-switch {
     display: flex;
     align-items: center;
@@ -242,6 +246,7 @@ main {
     border: 1.5px solid var(--border);
     margin: 20px 0 4px;
     width: fit-content;
+    max-width: 100%;
     box-shadow: var(--shadow-sm);
 }
 
@@ -1497,93 +1502,488 @@ pre {
 }
 
 @media (max-width: 600px) {
+    main {
+        padding: 12px 10px 48px;
+    }
+
     .top {
-        gap: 12px;
+        flex-wrap: nowrap;
+        gap: 8px;
+        padding: 8px 0 12px;
+        align-items: center;
     }
 
     .app-brand {
-        gap: 10px;
+        flex: 1;
+        min-width: 0;
+        gap: 8px;
     }
 
     .app-logo {
-        width: 36px;
-        height: 36px;
-        border-radius: 10px;
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
     }
 
     .top h1 {
-        font-size: 18px;
+        font-size: 14.5px;
+        line-height: 1.25;
+        white-space: normal;
+        word-break: break-word;
+    }
+
+    .top-actions {
+        flex-shrink: 0;
+        gap: 6px;
     }
 
     .lang-flags {
         padding: 2px;
         gap: 2px;
+        border-radius: 9px;
     }
 
     .lang-flag-btn {
-        width: 30px;
-        height: 30px;
-        font-size: 17px !important;
+        width: 28px;
+        height: 28px;
+        font-size: 15px !important;
+        border-radius: 7px !important;
     }
 
     .theme-toggle-btn {
-        width: 34px;
-        height: 34px;
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
     }
 
+    /* Platform Switcher 100% Responsive Grid on Mobile */
+    .platform-switch {
+        width: 100% !important;
+        display: grid !important;
+        grid-template-columns: repeat(3, 1fr) !important;
+        gap: 4px !important;
+        padding: 4px !important;
+        margin: 12px 0 8px !important;
+        border-radius: 12px !important;
+        box-sizing: border-box !important;
+    }
+
+    .platform-tab {
+        padding: 8px 4px !important;
+        font-size: 11.5px !important;
+        gap: 4px !important;
+        justify-content: center !important;
+        text-align: center !important;
+        border-radius: 8px !important;
+        white-space: nowrap !important;
+        width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    .platform-pill {
+        display: none !important;
+    }
+
+    /* Search Bar Mobile */
+    .search-box-wrapper {
+        margin: 10px 0 12px !important;
+        padding: 4px 6px 4px 10px !important;
+        border-radius: 12px !important;
+    }
+
+    .search-input {
+        font-size: 13px !important;
+        padding: 6px 4px !important;
+    }
+
+    .search-btn {
+        padding: 6px 12px !important;
+        height: 36px !important;
+        font-size: 12.5px !important;
+        border-radius: 9px !important;
+    }
+
+    /* Genre Chips Horizontal Scroll on Mobile */
+    .chips {
+        display: flex !important;
+        flex-wrap: nowrap !important;
+        overflow-x: auto !important;
+        gap: 6px !important;
+        margin: 8px 0 14px !important;
+        padding-bottom: 4px !important;
+        -webkit-overflow-scrolling: touch !important;
+        scrollbar-width: none !important;
+    }
+
+    .chips::-webkit-scrollbar {
+        display: none !important;
+    }
+
+    .chips small {
+        flex-shrink: 0 !important;
+        font-size: 10.5px !important;
+    }
+
+    .chip {
+        flex-shrink: 0 !important;
+        padding: 5px 11px !important;
+        font-size: 11.5px !important;
+    }
+
+    /* Drama Cards Grid Mobile */
+    .grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 10px !important;
+    }
+
+    .card {
+        padding: 7px !important;
+        border-radius: 10px !important;
+    }
+
+    .card h3 {
+        font-size: 13px !important;
+        height: 34px !important;
+        margin: 6px 2px 2px !important;
+    }
+
+    .card small {
+        font-size: 11px !important;
+    }
+
+    /* Detail Modal Bottom Sheet for Mobile */
+    .overlay {
+        padding: 0 !important;
+        align-items: flex-end !important;
+    }
+
+    .modal {
+        width: 100% !important;
+        max-width: 100% !important;
+        border-radius: 20px 20px 0 0 !important;
+        padding: 14px 12px 32px !important;
+        max-height: 92vh !important;
+        margin: 0 !important;
+        border-bottom: none !important;
+        box-sizing: border-box !important;
+    }
+
+    .x {
+        top: 10px !important;
+        right: 10px !important;
+        width: 32px !important;
+        height: 32px !important;
+        font-size: 13px !important;
+    }
+
+    /* Detail Head Row Mobile */
     .head {
-        flex-direction: column;
+        flex-direction: row !important;
+        gap: 12px !important;
+        align-items: flex-start !important;
+        margin-bottom: 12px !important;
+        padding-right: 32px !important;
     }
 
     .head .big {
-        width: 120px;
+        width: 76px !important;
+        min-width: 76px !important;
+        aspect-ratio: 3/4 !important;
+        border-radius: 8px !important;
     }
 
-    .grid {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 12px;
+    .head h2 {
+        font-size: 15.5px !important;
+        margin: 0 0 4px !important;
+        line-height: 1.3 !important;
     }
 
-    .btn-download-all {
-        width: 100%;
-        font-size: 14px !important;
-        padding: 11px 16px !important;
+    .head p.muted {
+        font-size: 11.5px !important;
+        line-height: 1.35 !important;
+        margin: 0 0 3px !important;
+        display: -webkit-box !important;
+        -webkit-line-clamp: 2 !important;
+        -webkit-box-orient: vertical !important;
+        overflow: hidden !important;
     }
 
-    .btn-download-zip {
-        width: 100%;
-        font-size: 14px !important;
-        padding: 11px 16px !important;
+    /* Video Player Mobile */
+    .player {
+        margin-bottom: 12px !important;
+        padding: 4px !important;
+        border-radius: 12px !important;
     }
 
-    .btn-download-selected {
-        width: 100%;
+    .player video {
+        max-height: 48vh !important;
+        border-radius: 8px !important;
+    }
+
+    .player .row {
+        padding: 8px 4px 4px !important;
+        gap: 6px !important;
+        display: flex !important;
+        flex-wrap: wrap !important;
+    }
+
+    .player .row strong {
+        width: 100% !important;
+        font-size: 13px !important;
+        margin-bottom: 2px !important;
+        display: block !important;
+        line-height: 1.3 !important;
+        word-break: break-word !important;
+    }
+
+    .player .row .btn,
+    .player .row .mini {
+        flex: 1 1 auto !important;
+        text-align: center !important;
+        justify-content: center !important;
+        min-height: 34px !important;
+        padding: 6px 10px !important;
+        font-size: 11.5px !important;
+    }
+
+    /* Khmer Subtitle Toolbar and Card Mobile */
+    .player-sub-toolbar {
+        top: 8px !important;
+        right: 8px !important;
+        gap: 4px !important;
+    }
+
+    .sub-pill-btn {
+        padding: 3px 8px !important;
+        font-size: 10px !important;
+    }
+
+    .sub-settings-popover {
+        top: 28px !important;
+        right: 0 !important;
+        min-width: 165px !important;
+        padding: 8px 10px !important;
+    }
+
+    .v-subtitle-overlay {
+        bottom: 38px !important;
+        padding: 0 8px !important;
+    }
+
+    .v-subtitle-box {
+        padding: 4px 10px !important;
+        max-width: 96% !important;
+    }
+
+    .font-sm .v-subtitle-text { font-size: 12.5px !important; }
+    .font-md .v-subtitle-text { font-size: 15px !important; }
+    .font-lg .v-subtitle-text { font-size: 18px !important; }
+
+    .subtitle-control-card {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        padding: 8px 10px !important;
+        gap: 8px !important;
+        margin: 6px 0 10px !important;
+    }
+
+    .sub-status-info {
+        justify-content: space-between !important;
+        font-size: 12px !important;
+    }
+
+    .sub-action-buttons {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: 5px !important;
+        width: 100% !important;
+    }
+
+    .sub-action-buttons .btn-sub {
+        flex: 1 1 calc(50% - 6px) !important;
+        padding: 6px 8px !important;
+        font-size: 11px !important;
+        text-align: center !important;
         justify-content: center !important;
     }
 
+    .sub-action-buttons .btn-sub.mini-ai,
+    .sub-action-buttons .btn-sub.clear,
+    .sub-action-buttons .btn-sub.key-btn {
+        flex: 0 0 auto !important;
+        padding: 6px 9px !important;
+    }
+
+    /* Detail Actions Panel Mobile */
+    .detail-actions-panel {
+        padding: 10px !important;
+        margin: 10px 0 !important;
+        border-radius: 12px !important;
+        gap: 8px !important;
+    }
+
+    .primary-actions-row {
+        gap: 8px !important;
+    }
+
+    .btn-download-all,
+    .btn-download-zip,
+    .btn-download-selected,
     .btn-download-zip-sel {
-        width: 100%;
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        padding: 10px 14px !important;
+        font-size: 13.5px !important;
         justify-content: center !important;
     }
 
     .secondary-actions-row {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 8px;
+        gap: 8px !important;
+        padding-top: 6px !important;
     }
 
     .selection-buttons {
-        width: 100%;
-        justify-content: flex-start;
+        display: flex !important;
+        width: 100% !important;
+        gap: 5px !important;
+        overflow-x: auto !important;
+        flex-wrap: nowrap !important;
+        padding-bottom: 2px !important;
+        scrollbar-width: none !important;
+    }
+
+    .selection-buttons::-webkit-scrollbar {
+        display: none !important;
+    }
+
+    .selection-buttons .mini-chip {
+        flex-shrink: 0 !important;
+        padding: 5px 9px !important;
+        font-size: 11.5px !important;
+    }
+
+    .export-buttons {
+        width: 100% !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 6px !important;
+    }
+
+    .export-buttons .mini-chip {
+        padding: 5px 9px !important;
+        font-size: 11.5px !important;
     }
 
     .download-progress-header {
-        flex-direction: column;
-        align-items: flex-start;
+        flex-direction: column !important;
+        align-items: flex-start !important;
+        gap: 8px !important;
     }
 
     .btn-stop-download {
-        align-self: flex-end;
+        align-self: flex-end !important;
+        padding: 5px 10px !important;
+    }
+
+    /* Episode Grid 3 Columns on Mobile */
+    .epgrid {
+        grid-template-columns: repeat(3, 1fr) !important;
+        gap: 7px !important;
+        margin-top: 10px !important;
+    }
+
+    .ep {
+        padding: 5px !important;
+        border-radius: 8px !important;
+        gap: 3px !important;
+        font-size: 11px !important;
+    }
+
+    .ep span {
+        font-size: 10.5px !important;
+    }
+
+    .ep .mini {
+        padding: 4px 6px !important;
+        font-size: 10.5px !important;
+        min-height: 26px !important;
+        border-radius: 5px !important;
+    }
+
+    .ep .thumb {
+        border-radius: 6px !important;
+    }
+
+    .downloaded-badge {
+        width: 18px !important;
+        height: 18px !important;
+        font-size: 10.5px !important;
+        top: 4px !important;
+        right: 4px !important;
+    }
+
+    .ep-status-pill {
+        font-size: 9.5px !important;
+        padding: 2px 4px !important;
+    }
+
+    /* ZIP and Subtitle Editor Modals Mobile */
+    .zip-modal-overlay {
+        padding: 8px !important;
+        align-items: flex-end !important;
+    }
+
+    .zip-modal-content {
+        padding: 16px 14px !important;
+        border-radius: 18px 18px 0 0 !important;
+        max-height: 90vh !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    .sub-editor-modal {
+        max-width: 100% !important;
+        width: 100% !important;
+    }
+
+    .sub-line-row {
+        flex-direction: column !important;
+        gap: 4px !important;
+        padding: 6px 8px !important;
+    }
+
+    .sub-line-time {
+        min-width: auto !important;
+        padding-top: 0 !important;
+        font-size: 10.5px !important;
+    }
+
+    .sub-line-text-input {
+        font-size: 12px !important;
+        padding: 6px 8px !important;
+    }
+
+    .sub-line-inputs {
+        width: 100% !important;
+    }
+
+    .sub-editor-modal .btn-sub {
+        font-size: 11.5px !important;
+        padding: 7px 10px !important;
+    }
+}
+
+@media (max-width: 360px) {
+    .epgrid {
+        grid-template-columns: repeat(2, 1fr) !important;
+        gap: 6px !important;
+    }
+
+    .platform-tab {
+        font-size: 10.5px !important;
+        padding: 6px 2px !important;
     }
 }
 
