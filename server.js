@@ -1575,7 +1575,7 @@ app.post('/api/subtitles/generate', wrap(async ({ body }) => {
   const videoId = String(body.videoId || '').replace(/[\\/:*?"<>|]/g, '_');
   const videoUrl = String(body.videoUrl || '').trim();
   const apiKey = String(body.apiKey || process.env.GEMINI_API_KEY || '').trim();
-  const requestedModel = String(body.model || 'gemini-2.5-flash').trim();
+  const requestedModel = String(body.model || 'gemini-3.5-flash-lite').trim();
 
   if (!videoId) throw new Error('Missing videoId');
   if (!videoUrl && !body.audioBase64) throw new Error('Missing videoUrl');
@@ -1713,15 +1713,21 @@ Return ONLY a valid JSON array of objects:
     ],
     generationConfig: {
       responseMimeType: "application/json",
-      temperature: 0.1,
       maxOutputTokens: 8192
     }
   };
 
-  const modelsToTry = [requestedModel, 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'].filter((v, i, a) => a.indexOf(v) === i);
+  const modelsToTry = [
+    requestedModel,
+    'gemini-3.5-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash'
+  ].filter((v, i, a) => a.indexOf(v) === i);
 
   let rawJson = null;
-  let lastError = null;
+  const modelErrors = [];
 
   for (const model of modelsToTry) {
     try {
@@ -1742,13 +1748,13 @@ Return ONLY a valid JSON array of objects:
         break;
       }
     } catch (e) {
-      lastError = e;
+      modelErrors.push(e.message);
       console.warn(`[Subtitle AI] Model ${model} attempt failed: ${e.message}`);
     }
   }
 
   if (!rawJson) {
-    throw lastError || new Error('Failed to generate subtitles with Gemini AI');
+    throw new Error(`Failed to generate subtitles with Gemini AI: ${modelErrors.join(' | ')}`);
   }
 
   let parsed = [];
