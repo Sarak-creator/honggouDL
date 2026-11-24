@@ -1408,9 +1408,13 @@ app.post('/api/subtitles/save', wrap(async ({ body }) => {
   const id = String(body.videoId).replace(/[\\/:*?"<>|]/g, '_');
   if (!id) throw new Error('Missing videoId');
   const subs = Array.isArray(body.subtitles) ? body.subtitles : [];
-  fs.mkdirSync(SUBTITLE_DIR, { recursive: true });
-  const subFile = path.join(SUBTITLE_DIR, `${id}.json`);
-  fs.writeFileSync(subFile, JSON.stringify({ videoId: id, updatedAt: Date.now(), subtitles: subs }, null, 2), 'utf8');
+  try {
+    fs.mkdirSync(SUBTITLE_DIR, { recursive: true });
+    const subFile = path.join(SUBTITLE_DIR, `${id}.json`);
+    fs.writeFileSync(subFile, JSON.stringify({ videoId: id, updatedAt: Date.now(), subtitles: subs }, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[Subtitles] Save error (ignoring for serverless):', err.message);
+  }
   return { success: true, count: subs.length };
 }));
 
@@ -1439,6 +1443,134 @@ app.get('/api/subtitles/export/:videoId', async (req, res) => {
   }
 });
 
+// Pure JavaScript Audio Extraction from MPEG-TS & HLS (Zero FFmpeg required for Vercel Serverless)
+function findAudioPid(tsBuf) {
+  for (let i = 0; i + 188 <= Math.min(tsBuf.length, 188 * 2000); i += 188) {
+    if (tsBuf[i] !== 0x47) continue;
+    const pusi = (tsBuf[i + 1] & 0x40) !== 0;
+    if (!pusi) continue;
+    const pid = ((tsBuf[i + 1] & 0x1f) << 8) | tsBuf[i + 2];
+    if (pid === 0) continue;
+    const afc = (tsBuf[i + 3] >> 4) & 0x3;
+    let offset = 4;
+    if (afc === 2) continue;
+    if (afc === 3) offset = 5 + tsBuf[i + 4];
+    if (offset + 4 > 188) continue;
+    if (tsBuf[i + offset] === 0x00 && tsBuf[i + offset + 1] === 0x00 && tsBuf[i + offset + 2] === 0x01) {
+      const streamId = tsBuf[i + offset + 3];
+      if ((streamId >= 0xC0 && streamId <= 0xDF) || streamId === 0xBD) return pid;
+    }
+  }
+  return 257; // Default audio PID fallback
+}
+
+function extractAacFromTs(tsBuf, audioPid = 257) {
+  const aacFrames = [];
+  let inAudioPes = false;
+
+  for (let i = 0; i + 188 <= tsBuf.length; i += 188) {
+    if (tsBuf[i] !== 0x47) continue;
+    const pusi = (tsBuf[i + 1] & 0x40) !== 0;
+    const pid = ((tsBuf[i + 1] & 0x1f) << 8) | tsBuf[i + 2];
+    if (pid !== audioPid) continue;
+
+    const afc = (tsBuf[i + 3] >> 4) & 0x3;
+    let offset = 4;
+    if (afc === 2) continue;
+    if (afc === 3) offset = 5 + tsBuf[i + 4];
+    if (offset >= 188) continue;
+
+    const chunk = tsBuf.subarray(i + offset, i + 188);
+
+    if (pusi) {
+      if (chunk.length >= 9 && chunk[0] === 0x00 && chunk[1] === 0x00 && chunk[2] === 0x01) {
+        const pesHdrLen = 9 + chunk[8];
+        if (chunk.length > pesHdrLen) {
+          aacFrames.push(chunk.subarray(pesHdrLen));
+          inAudioPes = true;
+        }
+      }
+    } else if (inAudioPes) {
+      aacFrames.push(chunk);
+    }
+  }
+  return Buffer.concat(aacFrames);
+}
+
+async function extractAacFromHls(m3u8Url) {
+  const r = await fetch(m3u8Url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': m3u8Url.includes('tjyyjk.cn') || m3u8Url.includes('huangguo') ? 'https://huangguoai.com/' : 'https://www.yeguodj.com/',
+    }
+  });
+  if (!r.ok) throw new Error(`Failed to fetch playlist (${r.status})`);
+  const text = await r.text();
+  const lines = text.split(/\r?\n/);
+  let keyBuf = null;
+  let ivBuf = null;
+  const segments = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#EXT-X-KEY:')) {
+      const uriMatch = trimmed.match(/URI=["']([^"']+)["']/i);
+      const ivMatch = trimmed.match(/IV=0x([0-9a-fA-F]+)/i);
+      if (uriMatch) {
+        const keyUrl = new URL(uriMatch[1], m3u8Url).href;
+        const keyRes = await fetch(keyUrl);
+        if (keyRes.ok) keyBuf = Buffer.from(await keyRes.arrayBuffer());
+      }
+      if (ivMatch) ivBuf = Buffer.from(ivMatch[1], 'hex');
+    } else if (trimmed && !trimmed.startsWith('#')) {
+      segments.push(new URL(trimmed, m3u8Url).href);
+    }
+  }
+
+  if (!segments.length) throw new Error('No video segments found in playlist');
+
+  let audioPid = null;
+  const aacChunks = [];
+  const BATCH_SIZE = 8;
+
+  for (let i = 0; i < segments.length; i += BATCH_SIZE) {
+    const batchUrls = segments.slice(i, i + BATCH_SIZE);
+    const batchDecrypted = await Promise.all(batchUrls.map(async (segUrl, bIdx) => {
+      const segIdx = i + bIdx;
+      try {
+        const segRes = await fetch(segUrl);
+        if (!segRes.ok) return null;
+        let buf = Buffer.from(await segRes.arrayBuffer());
+        if (keyBuf) {
+          let segIv = ivBuf;
+          if (!segIv) {
+            segIv = Buffer.alloc(16);
+            segIv.writeUInt32BE(segIdx, 12);
+          }
+          const decipher = crypto.createDecipheriv('aes-128-cbc', keyBuf, segIv);
+          decipher.setAutoPadding(true);
+          buf = Buffer.concat([decipher.update(buf), decipher.final()]);
+        }
+        return buf;
+      } catch (err) {
+        console.warn(`[extractAacFromHls] segment ${segIdx} error:`, err.message);
+        return null;
+      }
+    }));
+
+    for (const tsBuf of batchDecrypted) {
+      if (!tsBuf || tsBuf.length < 188) continue;
+      if (audioPid === null) audioPid = findAudioPid(tsBuf);
+      const aac = extractAacFromTs(tsBuf, audioPid);
+      if (aac && aac.length) aacChunks.push(aac);
+    }
+  }
+
+  const finalAac = Buffer.concat(aacChunks);
+  if (!finalAac.length) throw new Error('Could not extract audio track from video stream');
+  return finalAac;
+}
+
 app.post('/api/subtitles/generate', wrap(async ({ body }) => {
   const videoId = String(body.videoId || '').replace(/[\\/:*?"<>|]/g, '_');
   const videoUrl = String(body.videoUrl || '').trim();
@@ -1446,7 +1578,7 @@ app.post('/api/subtitles/generate', wrap(async ({ body }) => {
   const requestedModel = String(body.model || 'gemini-2.5-flash').trim();
 
   if (!videoId) throw new Error('Missing videoId');
-  if (!videoUrl) throw new Error('Missing videoUrl');
+  if (!videoUrl && !body.audioBase64) throw new Error('Missing videoUrl');
   if (!apiKey) throw new Error('Missing Gemini API Key. Please enter your API Key or set GEMINI_API_KEY in .env.');
 
   const subFile = path.join(SUBTITLE_DIR, `${videoId}.json`);
@@ -1459,52 +1591,89 @@ app.post('/api/subtitles/generate', wrap(async ({ body }) => {
     } catch {}
   }
 
-  if (!hasFfmpeg) {
-    throw new Error('Local FFmpeg binary is required on the server to extract audio for AI subtitle generation.');
+  let mediaBase64 = '';
+  let mediaMimeType = 'audio/mp3';
+
+  // Option 1: Direct audio base64 passed from client
+  if (body.audioBase64) {
+    mediaBase64 = String(body.audioBase64).replace(/^data:[^;]+;base64,/, '');
+    mediaMimeType = body.mimeType || 'audio/mp3';
+  }
+  // Option 2: Local FFmpeg if available
+  else if (hasFfmpeg) {
+    try {
+      const tempAudio = path.join(os.tmpdir(), `sub_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`);
+      const headers = videoUrl.includes('huangguo') || videoUrl.includes('tjyyjk.cn')
+        ? 'User-Agent: Mozilla/5.0\r\nReferer: https://huangguoai.com/\r\n'
+        : videoUrl.includes('yeguo')
+        ? 'User-Agent: Mozilla/5.0\r\nReferer: https://www.yeguodj.com/\r\n'
+        : 'User-Agent: Mozilla/5.0\r\n';
+
+      const ffmpegArgs = [
+        '-headers', headers,
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
+        '-y',
+        '-i', videoUrl,
+        '-vn',
+        '-ar', '16000',
+        '-ac', '1',
+        '-b:a', '64k',
+        tempAudio
+      ];
+
+      await new Promise((resolve, reject) => {
+        const proc = spawn(FFMPEG_BIN, ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let errOutput = '';
+        proc.stderr.on('data', (d) => { errOutput += d.toString(); });
+        proc.on('error', reject);
+        proc.on('close', (code) => {
+          if (code === 0 && fs.existsSync(tempAudio) && fs.statSync(tempAudio).size > 1000) {
+            resolve();
+          } else {
+            reject(new Error(`FFmpeg audio extraction failed (code ${code}): ${errOutput.slice(-300)}`));
+          }
+        });
+      });
+
+      mediaBase64 = fs.readFileSync(tempAudio).toString('base64');
+      mediaMimeType = 'audio/mp3';
+      try { fs.unlinkSync(tempAudio); } catch {}
+    } catch (ffErr) {
+      console.warn('[Subtitles] Local FFmpeg extraction failed, falling back to pure JavaScript:', ffErr.message);
+    }
   }
 
-  fs.mkdirSync(SUBTITLE_DIR, { recursive: true });
-  const tempAudio = path.join(os.tmpdir(), `sub_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`);
-
-  const headers = videoUrl.includes('huangguo') || videoUrl.includes('tjyyjk.cn')
-    ? 'User-Agent: Mozilla/5.0\r\nReferer: https://huangguoai.com/\r\n'
-    : videoUrl.includes('yeguo')
-    ? 'User-Agent: Mozilla/5.0\r\nReferer: https://www.yeguodj.com/\r\n'
-    : 'User-Agent: Mozilla/5.0\r\n';
-
-  const ffmpegArgs = [
-    '-headers', headers,
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-y',
-    '-i', videoUrl,
-    '-vn',
-    '-ar', '16000',
-    '-ac', '1',
-    '-b:a', '64k',
-    tempAudio
-  ];
-
-  await new Promise((resolve, reject) => {
-    const proc = spawn(FFMPEG_BIN, ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let errOutput = '';
-    proc.stderr.on('data', (d) => { errOutput += d.toString(); });
-    proc.on('error', reject);
-    proc.on('close', (code) => {
-      if (code === 0 && fs.existsSync(tempAudio) && fs.statSync(tempAudio).size > 1000) {
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg audio extraction failed (code ${code}): ${errOutput.slice(-300)}`));
+  // Option 3: Pure JavaScript Extraction (Zero FFmpeg required - Vercel Serverless ready)
+  if (!mediaBase64) {
+    let resolvedUrl = videoUrl;
+    if (resolvedUrl.startsWith('/')) {
+      const port = process.env.PORT || 3000;
+      resolvedUrl = `http://127.0.0.1:${port}${resolvedUrl}`;
+    }
+    const isHls = /\.m3u8/i.test(resolvedUrl) || resolvedUrl.includes('yeguo') || resolvedUrl.includes('huangguo');
+    if (isHls) {
+      console.log('[Subtitles] Extracting AAC audio from HLS playlist via pure JavaScript (Serverless mode)...');
+      const aacBuffer = await extractAacFromHls(resolvedUrl);
+      mediaBase64 = aacBuffer.toString('base64');
+      mediaMimeType = 'audio/aac';
+      console.log(`[Subtitles] Extracted ${Math.round(aacBuffer.length / 1024)} KB clean AAC audio.`);
+    } else {
+      console.log('[Subtitles] Fetching direct video stream for Gemini processing...');
+      const vRes = await fetch(resolvedUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+      });
+      if (!vRes.ok) throw new Error(`Failed to fetch video stream (${vRes.status})`);
+      const vBuf = Buffer.from(await vRes.arrayBuffer());
+      if (vBuf.length > 20 * 1024 * 1024) {
+        throw new Error(`Video file too large (${Math.round(vBuf.length / 1024 / 1024)}MB) for serverless direct processing. Please run locally with FFmpeg.`);
       }
-    });
-  });
-
-  let audioBase64 = '';
-  try {
-    audioBase64 = fs.readFileSync(tempAudio).toString('base64');
-  } finally {
-    try { fs.unlinkSync(tempAudio); } catch {}
+      mediaBase64 = vBuf.toString('base64');
+      mediaMimeType = 'video/mp4';
+    }
   }
 
   const systemInstructionText = `You are an expert film dubbing translator and subtitler specializing in translating foreign films and Chinese short dramas into authentic, natural, colloquial spoken Khmer subtitles (ភាសាខ្មែរសម្រាប់រឿងភាគខ្លី).
@@ -1532,8 +1701,8 @@ Return ONLY a valid JSON array of objects:
         parts: [
           {
             inlineData: {
-              mimeType: "audio/mp3",
-              data: audioBase64
+              mimeType: mediaMimeType,
+              data: mediaBase64
             }
           },
           {
@@ -1607,12 +1776,17 @@ Return ONLY a valid JSON array of objects:
 
   formattedSubtitles.sort((a, b) => a.start - b.start);
 
-  fs.writeFileSync(subFile, JSON.stringify({
-    videoId,
-    updatedAt: Date.now(),
-    model: requestedModel,
-    subtitles: formattedSubtitles
-  }, null, 2), 'utf8');
+  try {
+    fs.mkdirSync(SUBTITLE_DIR, { recursive: true });
+    fs.writeFileSync(subFile, JSON.stringify({
+      videoId,
+      updatedAt: Date.now(),
+      model: requestedModel,
+      subtitles: formattedSubtitles
+    }, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[Subtitles] Subtitle cache write error (ignoring for serverless):', err.message);
+  }
 
   return {
     success: true,
