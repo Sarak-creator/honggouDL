@@ -1575,7 +1575,7 @@ app.post('/api/subtitles/generate', wrap(async ({ body }) => {
   const videoId = String(body.videoId || '').replace(/[\\/:*?"<>|]/g, '_');
   const videoUrl = String(body.videoUrl || '').trim();
   const apiKey = String(body.apiKey || process.env.GEMINI_API_KEY || '').trim();
-  const requestedModel = String(body.model || 'gemini-3.5-flash-lite').trim();
+  const requestedModel = String(body.model || 'gemini-3.8-flash').trim();
 
   if (!videoId) throw new Error('Missing videoId');
   if (!videoUrl && !body.audioBase64) throw new Error('Missing videoUrl');
@@ -1717,14 +1717,42 @@ Return ONLY a valid JSON array of objects:
     }
   };
 
-  const modelsToTry = [
+  // Dynamically fetch available models from Google AI Studio if possible
+  let dynamicModels = [];
+  try {
+    const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    if (listRes.ok) {
+      const listData = await listRes.json();
+      if (Array.isArray(listData.models)) {
+        dynamicModels = listData.models
+          .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+          .map((m) => m.name.replace(/^models\//, ''));
+      }
+    }
+  } catch {}
+
+  const priorityList = [
     requestedModel,
+    'gemini-3.8-flash',
     'gemini-3.5-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash'
-  ].filter((v, i, a) => a.indexOf(v) === i);
+    'gemini-3.5-flash',
+    'gemini-3.8-pro',
+  ];
+
+  const modelsToTry = [
+    ...priorityList,
+    ...dynamicModels.filter((m) =>
+      !priorityList.includes(m) &&
+      !m.includes('2.0') &&
+      !m.includes('1.5') &&
+      !m.includes('2.5') &&
+      !m.includes('embedding') &&
+      !m.includes('imagen') &&
+      !m.includes('aqa')
+    )
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+  console.log('[Subtitle AI] Models queue:', modelsToTry);
 
   let rawJson = null;
   const modelErrors = [];
@@ -1739,7 +1767,26 @@ Return ONLY a valid JSON array of objects:
       });
       if (!resp.ok) {
         const errJson = await resp.json().catch(() => ({}));
-        throw new Error(`[${model}] ${errJson.error?.message || resp.statusText}`);
+        const errMsg = errJson.error?.message || resp.statusText;
+        // If temporary high-demand error, retry once after a short delay
+        if (resp.status === 503 || resp.status === 429 || errMsg.includes('high demand') || errMsg.includes('temporary')) {
+          console.warn(`[Subtitle AI] Model ${model} high demand (${errMsg}), retrying in 2s...`);
+          await new Promise((r) => setTimeout(r, 2000));
+          const retryResp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (retryResp.ok) {
+            const data = await retryResp.json();
+            const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (text) {
+              rawJson = text;
+              break;
+            }
+          }
+        }
+        throw new Error(`[${model}] ${errMsg}`);
       }
       const data = await resp.json();
       const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
