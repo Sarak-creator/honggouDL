@@ -1369,6 +1369,258 @@ app.get('/api/huangguo/stream', async (req, res) => {
   }
 });
 
+// ---- Khmer Subtitle Generation, Storage & Export Engine ----------------
+const SUBTITLE_DIR = path.join(CACHE_DIR, 'subtitles');
+
+function parseTimeToSeconds(val) {
+  if (typeof val === 'number') return Math.max(0, val);
+  if (!val) return 0;
+  const s = String(val).trim().replace(',', '.');
+  const parts = s.split(':').map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  const num = parseFloat(s);
+  return isNaN(num) ? 0 : num;
+}
+
+function formatSrtTime(sec) {
+  const s = Math.max(0, sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const remS = Math.floor(s % 60);
+  const ms = Math.floor((s - Math.floor(s)) * 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(remS).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+}
+
+app.get('/api/subtitles/:videoId', wrap(async ({ params }) => {
+  const id = String(params.videoId).replace(/[\\/:*?"<>|]/g, '_');
+  const subFile = path.join(SUBTITLE_DIR, `${id}.json`);
+  if (fs.existsSync(subFile)) {
+    try {
+      const content = JSON.parse(fs.readFileSync(subFile, 'utf8'));
+      return { success: true, videoId: id, subtitles: content?.subtitles || content || [] };
+    } catch {}
+  }
+  return { success: false, found: false, subtitles: [] };
+}));
+
+app.post('/api/subtitles/save', wrap(async ({ body }) => {
+  const id = String(body.videoId).replace(/[\\/:*?"<>|]/g, '_');
+  if (!id) throw new Error('Missing videoId');
+  const subs = Array.isArray(body.subtitles) ? body.subtitles : [];
+  fs.mkdirSync(SUBTITLE_DIR, { recursive: true });
+  const subFile = path.join(SUBTITLE_DIR, `${id}.json`);
+  fs.writeFileSync(subFile, JSON.stringify({ videoId: id, updatedAt: Date.now(), subtitles: subs }, null, 2), 'utf8');
+  return { success: true, count: subs.length };
+}));
+
+app.get('/api/subtitles/export/:videoId', async (req, res) => {
+  try {
+    const id = String(req.params.videoId).replace(/[\\/:*?"<>|]/g, '_');
+    const name = String(req.query.name || `${id}_khmer`).replace(/[\\/:*?"<>|]/g, '_');
+    const subFile = path.join(SUBTITLE_DIR, `${id}.json`);
+    if (!fs.existsSync(subFile)) {
+      return res.status(404).send('Subtitles not found');
+    }
+    const content = JSON.parse(fs.readFileSync(subFile, 'utf8'));
+    const subs = content?.subtitles || content || [];
+    let srt = '\uFEFF';
+    subs.forEach((s, idx) => {
+      srt += `${idx + 1}\r\n${formatSrtTime(s.start)} --> ${formatSrtTime(s.end)}\r\n${s.text || ''}\r\n\r\n`;
+    });
+    res.set({
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(name)}.srt"; filename*=UTF-8''${encodeURIComponent(name)}.srt`,
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.send(srt);
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+});
+
+app.post('/api/subtitles/generate', wrap(async ({ body }) => {
+  const videoId = String(body.videoId || '').replace(/[\\/:*?"<>|]/g, '_');
+  const videoUrl = String(body.videoUrl || '').trim();
+  const apiKey = String(body.apiKey || process.env.GEMINI_API_KEY || '').trim();
+  const requestedModel = String(body.model || 'gemini-2.5-flash').trim();
+
+  if (!videoId) throw new Error('Missing videoId');
+  if (!videoUrl) throw new Error('Missing videoUrl');
+  if (!apiKey) throw new Error('Missing Gemini API Key. Please enter your API Key or set GEMINI_API_KEY in .env.');
+
+  const subFile = path.join(SUBTITLE_DIR, `${videoId}.json`);
+  if (!body.force && fs.existsSync(subFile)) {
+    try {
+      const cached = JSON.parse(fs.readFileSync(subFile, 'utf8'));
+      if (cached?.subtitles?.length) {
+        return { success: true, videoId, subtitles: cached.subtitles, fromCache: true };
+      }
+    } catch {}
+  }
+
+  if (!hasFfmpeg) {
+    throw new Error('Local FFmpeg binary is required on the server to extract audio for AI subtitle generation.');
+  }
+
+  fs.mkdirSync(SUBTITLE_DIR, { recursive: true });
+  const tempAudio = path.join(os.tmpdir(), `sub_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`);
+
+  const headers = videoUrl.includes('huangguo') || videoUrl.includes('tjyyjk.cn')
+    ? 'User-Agent: Mozilla/5.0\r\nReferer: https://huangguoai.com/\r\n'
+    : videoUrl.includes('yeguo')
+    ? 'User-Agent: Mozilla/5.0\r\nReferer: https://www.yeguodj.com/\r\n'
+    : 'User-Agent: Mozilla/5.0\r\n';
+
+  const ffmpegArgs = [
+    '-headers', headers,
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
+    '-y',
+    '-i', videoUrl,
+    '-vn',
+    '-ar', '16000',
+    '-ac', '1',
+    '-b:a', '64k',
+    tempAudio
+  ];
+
+  await new Promise((resolve, reject) => {
+    const proc = spawn(FFMPEG_BIN, ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let errOutput = '';
+    proc.stderr.on('data', (d) => { errOutput += d.toString(); });
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code === 0 && fs.existsSync(tempAudio) && fs.statSync(tempAudio).size > 1000) {
+        resolve();
+      } else {
+        reject(new Error(`FFmpeg audio extraction failed (code ${code}): ${errOutput.slice(-300)}`));
+      }
+    });
+  });
+
+  let audioBase64 = '';
+  try {
+    audioBase64 = fs.readFileSync(tempAudio).toString('base64');
+  } finally {
+    try { fs.unlinkSync(tempAudio); } catch {}
+  }
+
+  const systemInstructionText = `You are an expert film dubbing translator and subtitler specializing in translating foreign films and Chinese short dramas into authentic, natural, colloquial spoken Khmer subtitles (ភាសាខ្មែរសម្រាប់រឿងភាគខ្លី).
+
+RULES:
+1. Listen carefully to the spoken dialogue in this audio.
+2. Transcribe and translate all dialogue into authentic, natural, dramatic spoken Khmer (100% Khmer text).
+3. DO NOT leave any untranslated Chinese characters or foreign words inside the Khmer translation.
+4. Translate idioms, exclamations, and emotions accurately with dramatic depth (e.g. "放肆" -> "ព្រហើនណាស់!", "慢着" -> "ចាំបន្តិច!").
+5. Provide accurate timestamps (start, end) in seconds (numbers, e.g. 1.2, 4.5) or MM:SS.sss relative to this audio.
+6. In "original", include the transcribed original Chinese sentence.
+
+Return ONLY a valid JSON array of objects:
+[
+  { "start": 1.2, "end": 3.8, "text": "តើឯងគិតថាឯងជានរណា?", "original": "你以为你是谁？" }
+]`;
+
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemInstructionText }]
+    },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          {
+            inlineData: {
+              mimeType: "audio/mp3",
+              data: audioBase64
+            }
+          },
+          {
+            text: "Transcribe the spoken drama dialogue and translate it into authentic, natural spoken Khmer subtitles with exact timestamps. Return only a valid JSON array."
+          }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      temperature: 0.1,
+      maxOutputTokens: 8192
+    }
+  };
+
+  const modelsToTry = [requestedModel, 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite'].filter((v, i, a) => a.indexOf(v) === i);
+
+  let rawJson = null;
+  let lastError = null;
+
+  for (const model of modelsToTry) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!resp.ok) {
+        const errJson = await resp.json().catch(() => ({}));
+        throw new Error(`[${model}] ${errJson.error?.message || resp.statusText}`);
+      }
+      const data = await resp.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        rawJson = text;
+        break;
+      }
+    } catch (e) {
+      lastError = e;
+      console.warn(`[Subtitle AI] Model ${model} attempt failed: ${e.message}`);
+    }
+  }
+
+  if (!rawJson) {
+    throw lastError || new Error('Failed to generate subtitles with Gemini AI');
+  }
+
+  let parsed = [];
+  try {
+    const cleanText = rawJson.replace(/```json\s*/i, '').replace(/```\s*$/i, '').trim();
+    parsed = JSON.parse(cleanText);
+    if (!Array.isArray(parsed) && parsed.subtitles && Array.isArray(parsed.subtitles)) {
+      parsed = parsed.subtitles;
+    }
+  } catch (err) {
+    throw new Error(`Failed to parse AI response as JSON: ${err.message}`);
+  }
+
+  const formattedSubtitles = (Array.isArray(parsed) ? parsed : []).map((item, idx) => {
+    const start = parseTimeToSeconds(item.start);
+    const end = Math.max(start + 0.5, parseTimeToSeconds(item.end));
+    return {
+      id: idx + 1,
+      start: +start.toFixed(2),
+      end: +end.toFixed(2),
+      text: String(item.text || '').trim(),
+      original: String(item.original || '').trim(),
+    };
+  }).filter((s) => s.text);
+
+  formattedSubtitles.sort((a, b) => a.start - b.start);
+
+  fs.writeFileSync(subFile, JSON.stringify({
+    videoId,
+    updatedAt: Date.now(),
+    model: requestedModel,
+    subtitles: formattedSubtitles
+  }, null, 2), 'utf8');
+
+  return {
+    success: true,
+    videoId,
+    subtitles: formattedSubtitles
+  };
+}));
+
 // Image proxy: fetches covers server-side (no Referer) and converts HEIC -> JPEG,
 // because browsers cannot display HEIC.
 const imgCache = new Map();

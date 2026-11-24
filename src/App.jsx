@@ -164,6 +164,44 @@ function extractHuangguoId(str) {
   return null;
 }
 
+function parseTimeToSeconds(val) {
+  if (typeof val === 'number') return Math.max(0, val);
+  if (!val) return 0;
+  const s = String(val).trim().replace(',', '.');
+  const parts = s.split(':').map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  const num = parseFloat(s);
+  return isNaN(num) ? 0 : num;
+}
+
+function parseSrt(text) {
+  if (!text) return [];
+  const clean = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  const blocks = clean.split(/\n\n+/);
+  const result = [];
+  for (const block of blocks) {
+    const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines.length < 2) continue;
+    let timeLineIdx = 1;
+    if (lines[0].includes('-->')) timeLineIdx = 0;
+    const timeMatch = lines[timeLineIdx]?.match(
+      /(\d{1,2}:\d{2}:\d{2}[,\.]\d{3}|\d{1,2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{3}|\d{1,2}:\d{2}[,\.]\d{3})/
+    );
+    if (!timeMatch) continue;
+    const start = parseTimeToSeconds(timeMatch[1]);
+    const end = parseTimeToSeconds(timeMatch[2]);
+    const subtitleText = lines.slice(timeLineIdx + 1).join('\n');
+    result.push({
+      id: result.length + 1,
+      start: +start.toFixed(2),
+      end: +end.toFixed(2),
+      text: subtitleText,
+    });
+  }
+  return result;
+}
+
 // ---- main app ------------------------------------------------------------
 export default function App() {
   const [theme, setTheme] = useState(() => {
@@ -777,6 +815,102 @@ function Detail({ series, onClose, lang }) {
   const [transTitle, setTransTitle] = useState('');
   const [transDesc, setTransDesc] = useState('');
 
+  // Subtitle states
+  const [subtitlesMap, setSubtitlesMap] = useState({}); // videoId -> [ { id, start, end, text, original } ]
+  const [subtitleOffset, setSubtitleOffset] = useState(0);
+  const [isGeneratingSub, setIsGeneratingSub] = useState(false);
+  const [subModalOpen, setSubModalOpen] = useState(false);
+  const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
+  const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('hg_gemini_api_key') || '');
+  const [editingSubtitles, setEditingSubtitles] = useState([]);
+  const fileInputRef = useRef(null);
+
+  const currentVideoId = playing ? String(playing.ep.videoId) : null;
+  const currentSubtitles = currentVideoId ? (subtitlesMap[currentVideoId] || []) : [];
+
+  // Auto-fetch cached subtitle when episode is opened
+  useEffect(() => {
+    if (!currentVideoId || subtitlesMap[currentVideoId]) return;
+    api(`/api/subtitles/${currentVideoId}`)
+      .then((res) => {
+        if (res.success && Array.isArray(res.subtitles) && res.subtitles.length > 0) {
+          setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: res.subtitles }));
+        }
+      })
+      .catch(() => {});
+  }, [currentVideoId]);
+
+  const handleGenerateSubtitles = async () => {
+    if (!playing || !currentVideoId) return;
+    const key = geminiApiKey || localStorage.getItem('hg_gemini_api_key');
+    if (!key) {
+      setApiKeyModalOpen(true);
+      return;
+    }
+
+    setIsGeneratingSub(true);
+    setError('');
+    try {
+      const vUrl = playing.item.videoUrl || playing.item.playUrl;
+      const epIndex = eps.indexOf(playing.ep);
+      const res = await api('/api/subtitles/generate', {
+        videoId: currentVideoId,
+        videoUrl: vUrl,
+        apiKey: key,
+        seriesTitle: title,
+        episodeNum: String(playing.ep.episodeIndex ?? epIndex + 1),
+      });
+      if (res.success && Array.isArray(res.subtitles)) {
+        setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: res.subtitles }));
+      }
+    } catch (err) {
+      setError(`Subtitle error: ${err.message}`);
+    } finally {
+      setIsGeneratingSub(false);
+    }
+  };
+
+  const handleSrtUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !currentVideoId) return;
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      const text = evt.target.result;
+      const parsed = parseSrt(text);
+      if (parsed.length > 0) {
+        setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: parsed }));
+        api('/api/subtitles/save', { videoId: currentVideoId, subtitles: parsed }).catch(() => {});
+      } else {
+        alert('Could not parse subtitles from file. Please ensure it is a valid .srt or .vtt file.');
+      }
+    };
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
+  };
+
+  const handleDownloadSrt = () => {
+    if (!currentVideoId || !currentSubtitles.length) return;
+    const epIndex = eps.indexOf(playing.ep);
+    const fileName = `${title} ${label(playing.ep, epIndex)}_Khmer`;
+    window.open(`/api/subtitles/export/${currentVideoId}?name=${encodeURIComponent(fileName)}`, '_blank');
+  };
+
+  const handleClearSubtitles = () => {
+    if (!currentVideoId) return;
+    setSubtitlesMap((prev) => {
+      const next = { ...prev };
+      delete next[currentVideoId];
+      return next;
+    });
+  };
+
+  const handleSaveEditedSubtitles = () => {
+    if (!currentVideoId) return;
+    setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: editingSubtitles }));
+    api('/api/subtitles/save', { videoId: currentVideoId, subtitles: editingSubtitles }).catch(() => {});
+    setSubModalOpen(false);
+  };
+
   useEffect(() => {
     const isYeguo = series.platform === 'yeguo' || series.isYeguo;
     const isHuangguo = series.platform === 'huangguo' || series.isHuangguo;
@@ -1271,6 +1405,9 @@ function Detail({ series, onClose, lang }) {
               poster={findCover(playing.ep) || cover}
               autoPlay={true}
               onEnded={playNext}
+              subtitles={currentSubtitles}
+              subtitleOffset={subtitleOffset}
+              onSubtitleOffsetChange={setSubtitleOffset}
             />
             <p className="row">
               <strong>{title} · {label(playing.ep, eps.indexOf(playing.ep))}</strong>
@@ -1278,6 +1415,95 @@ function Detail({ series, onClose, lang }) {
               {nextReady && <button className="mini" onClick={playNext}>{t('nextEp', lang)}</button>}
               <button className="mini alt" onClick={() => setPlaying(null)}>{t('closePlayer', lang)}</button>
             </p>
+
+            {/* Khmer Subtitle Control Card */}
+            <div className="subtitle-control-card">
+              <div className="sub-status-info">
+                <span className="sub-icon">🇰🇭</span>
+                <div>
+                  <strong>{t('subtitlesKhmer', lang)}:</strong>{' '}
+                  {currentSubtitles.length > 0 ? (
+                    <span className="sub-count-tag">{t('subtitlesCount', lang, { count: currentSubtitles.length })}</span>
+                  ) : (
+                    <span className="sub-none-tag">{isGeneratingSub ? t('generatingSubtitles', lang) : t('noSubtitles', lang)}</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="sub-action-buttons">
+                {currentSubtitles.length === 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-sub ai-gen"
+                      onClick={handleGenerateSubtitles}
+                      disabled={isGeneratingSub}
+                      title={t('generateSubtitles', lang)}
+                    >
+                      {isGeneratingSub ? '⏳ ' + t('generatingSubtitles', lang) : t('generateSubtitles', lang)}
+                    </button>
+                    <label className="btn-sub upload" title={t('loadSrt', lang)}>
+                      {t('loadSrt', lang)}
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".srt,.vtt,.txt"
+                        style={{ display: 'none' }}
+                        onChange={handleSrtUpload}
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="btn-sub outline"
+                      onClick={() => {
+                        setEditingSubtitles([...currentSubtitles]);
+                        setSubModalOpen(true);
+                      }}
+                      title={t('viewSubtitles', lang)}
+                    >
+                      {t('viewSubtitles', lang)}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-sub outline"
+                      onClick={handleDownloadSrt}
+                      title={t('downloadSrt', lang)}
+                    >
+                      {t('downloadSrt', lang)}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-sub ai-gen mini-ai"
+                      onClick={handleGenerateSubtitles}
+                      disabled={isGeneratingSub}
+                      title="Re-generate with AI"
+                    >
+                      🔄 AI
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-sub clear"
+                      onClick={handleClearSubtitles}
+                      title={t('clearSubtitles', lang)}
+                    >
+                      ✕
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="btn-sub key-btn"
+                  onClick={() => setApiKeyModalOpen(true)}
+                  title="Gemini API Key Settings"
+                >
+                  ⚙️ Key
+                </button>
+              </div>
+            </div>
+
             <small className="muted">{playing.item.definition} · {playing.item.codec}. {t('vlcHint', lang)}</small>
           </div>
         )}
@@ -1598,6 +1824,118 @@ function Detail({ series, onClose, lang }) {
             );
           })}
         </div>
+
+        {/* Gemini API Key Modal */}
+        {apiKeyModalOpen && (
+          <div className="zip-modal-overlay" onClick={() => setApiKeyModalOpen(false)}>
+            <div className="zip-modal-content sub-key-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="zip-modal-header">
+                <h3>{t('apiKeyTitle', lang)}</h3>
+                <button type="button" className="zip-modal-close" onClick={() => setApiKeyModalOpen(false)}>✕</button>
+              </div>
+              <p className="muted" style={{ fontSize: '13px', margin: '4px 0 16px', lineHeight: 1.5 }}>
+                {t('apiKeyDesc', lang)}
+              </p>
+              <div style={{ marginBottom: '16px' }}>
+                <input
+                  type="password"
+                  className="search-input"
+                  style={{ width: '100%', padding: '10px 14px', borderRadius: '8px' }}
+                  placeholder="AIzaSy..."
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                />
+                <small style={{ display: 'block', marginTop: '6px' }}>
+                  <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)' }}>
+                    🔗 ចុចទីនេះដើម្បីយក Google Gemini API Key ដោយឥតគិតថ្លៃ (Get free key)
+                  </a>
+                </small>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="btn-sub outline"
+                  onClick={() => setApiKeyModalOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-sub ai-gen"
+                  onClick={() => {
+                    localStorage.setItem('hg_gemini_api_key', geminiApiKey.trim());
+                    setApiKeyModalOpen(false);
+                    if (playing && currentSubtitles.length === 0) {
+                      handleGenerateSubtitles();
+                    }
+                  }}
+                >
+                  {t('saveApiKey', lang)}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Subtitle Viewer / Editor Modal */}
+        {subModalOpen && (
+          <div className="zip-modal-overlay" onClick={() => setSubModalOpen(false)}>
+            <div className="zip-modal-content sub-editor-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="zip-modal-header">
+                <h3>🇰🇭 {t('viewSubtitles', lang)} ({editingSubtitles.length} {t('subtitlesCount', lang, { count: editingSubtitles.length })})</h3>
+                <button type="button" className="zip-modal-close" onClick={() => setSubModalOpen(false)}>✕</button>
+              </div>
+              <div className="sub-lines-list">
+                {editingSubtitles.map((sub, idx) => (
+                  <div key={idx} className="sub-line-row">
+                    <div className="sub-line-time">
+                      <span>{sub.start.toFixed(1)}s - {sub.end.toFixed(1)}s</span>
+                    </div>
+                    <div className="sub-line-inputs">
+                      {sub.original && <small className="sub-line-orig">{sub.original}</small>}
+                      <input
+                        type="text"
+                        className="sub-line-text-input"
+                        value={sub.text}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setEditingSubtitles((prev) => {
+                            const next = [...prev];
+                            next[idx] = { ...next[idx], text: val };
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
+                <button
+                  type="button"
+                  className="btn-sub outline"
+                  onClick={() => setSubModalOpen(false)}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  className="btn-sub outline"
+                  onClick={handleDownloadSrt}
+                >
+                  {t('downloadSrt', lang)}
+                </button>
+                <button
+                  type="button"
+                  className="btn-sub ai-gen"
+                  onClick={handleSaveEditedSubtitles}
+                >
+                  💾 Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
