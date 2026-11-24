@@ -826,6 +826,77 @@ function Detail({ series, onClose, lang }) {
   const fileInputRef = useRef(null);
   const autoGenAttemptedRef = useRef(new Set());
 
+  useEffect(() => {
+    const isYeguo = series.platform === 'yeguo' || series.isYeguo;
+    const isHuangguo = series.platform === 'huangguo' || series.isHuangguo;
+    const detailUrl = isYeguo
+      ? `/api/yeguo/series/${series.id}`
+      : isHuangguo
+      ? `/api/huangguo/series/${series.id}`
+      : `/api/series/${series.id}`;
+
+    api(detailUrl)
+      .then((r) => {
+        const row = r.find((x) => x.success !== false) || r[0];
+        if (!row || row.success === false)
+          setError(row?.errorCode === 'FREE_TIER_MONTHLY_QUOTA_REACHED'
+            ? t('quotaError', lang)
+            : row?.error || 'Could not load series details.');
+        else {
+          setInfo(row);
+          if (row.platform === 'yeguo' || row.isYeguo || isYeguo || row.platform === 'huangguo' || row.isHuangguo || isHuangguo) {
+            const initReady = {};
+            (row.episodes || []).forEach((ep) => {
+              if (ep.videoUrl || ep.downloadUrl) {
+                initReady[String(ep.videoId)] = {
+                  videoId: ep.videoId,
+                  videoUrl: ep.videoUrl,
+                  downloadUrl: ep.downloadUrl,
+                  playUrl: ep.playUrl,
+                  definition: ep.definition || '1080p',
+                  codec: ep.codec || 'H.264',
+                  success: true,
+                };
+              }
+            });
+            setReady(initReady);
+          }
+        }
+      })
+      .catch((e) => setError(e.message));
+    return () => {
+      cancelDownloadRef.current = true;
+      timers.current.forEach(clearInterval);
+    };
+  }, [series.id, series.platform, series.isYeguo, series.isHuangguo, lang]);
+
+  const s = info?.series || {};
+  const rawTitle = s.title || series.title;
+  const rawDesc = s.synopsis || series.desc || '';
+  const cover = (info?.series && findCover(info.series)) || series.cover;
+
+  useEffect(() => {
+    if (lang === 'zh-CN') return;
+    let active = true;
+    if (rawTitle) {
+      translateText(rawTitle, lang, 'zh-CN').then((tr) => { if (active) setTransTitle(tr); });
+    }
+    if (rawDesc) {
+      translateText(rawDesc, lang, 'zh-CN').then((tr) => { if (active) setTransDesc(tr); });
+    }
+    return () => { active = false; };
+  }, [rawTitle, rawDesc, lang]);
+
+  const title = (lang !== 'zh-CN' && transTitle) ? transTitle : rawTitle;
+  const desc = (lang !== 'zh-CN' && transDesc) ? transDesc : rawDesc;
+
+  const eps = useMemo(() => {
+    const e = info?.episodes || [];
+    if (e.length) return e;
+    return s.firstVideoId ? [{ videoId: s.firstVideoId, episodeIndex: '1' }] : [];
+  }, [info, s.firstVideoId]);
+  const label = (ep, n) => `${t('ep', lang)} ${ep.episodeIndex ?? n + 1}`;
+
   const currentVideoId = playing ? String(playing.ep.videoId) : null;
   const currentSubtitles = currentVideoId ? (subtitlesMap[currentVideoId] || []) : [];
 
@@ -933,77 +1004,6 @@ function Detail({ series, onClose, lang }) {
     api('/api/subtitles/save', { videoId: currentVideoId, subtitles: editingSubtitles }).catch(() => {});
     setSubModalOpen(false);
   };
-
-  useEffect(() => {
-    const isYeguo = series.platform === 'yeguo' || series.isYeguo;
-    const isHuangguo = series.platform === 'huangguo' || series.isHuangguo;
-    const detailUrl = isYeguo
-      ? `/api/yeguo/series/${series.id}`
-      : isHuangguo
-      ? `/api/huangguo/series/${series.id}`
-      : `/api/series/${series.id}`;
-
-    api(detailUrl)
-      .then((r) => {
-        const row = r.find((x) => x.success !== false) || r[0];
-        if (!row || row.success === false)
-          setError(row?.errorCode === 'FREE_TIER_MONTHLY_QUOTA_REACHED'
-            ? t('quotaError', lang)
-            : row?.error || 'Could not load series details.');
-        else {
-          setInfo(row);
-          if (row.platform === 'yeguo' || row.isYeguo || isYeguo || row.platform === 'huangguo' || row.isHuangguo || isHuangguo) {
-            const initReady = {};
-            (row.episodes || []).forEach((ep) => {
-              if (ep.videoUrl || ep.downloadUrl) {
-                initReady[String(ep.videoId)] = {
-                  videoId: ep.videoId,
-                  videoUrl: ep.videoUrl,
-                  downloadUrl: ep.downloadUrl,
-                  playUrl: ep.playUrl,
-                  definition: ep.definition || '1080p',
-                  codec: ep.codec || 'H.264',
-                  success: true,
-                };
-              }
-            });
-            setReady(initReady);
-          }
-        }
-      })
-      .catch((e) => setError(e.message));
-    return () => {
-      cancelDownloadRef.current = true;
-      timers.current.forEach(clearInterval);
-    };
-  }, [series.id, series.platform, series.isYeguo, series.isHuangguo, lang]);
-
-  const s = info?.series || {};
-  const rawTitle = s.title || series.title;
-  const rawDesc = s.synopsis || series.desc || '';
-  const cover = (info?.series && findCover(info.series)) || series.cover;
-
-  useEffect(() => {
-    if (lang === 'zh-CN') return;
-    let active = true;
-    if (rawTitle) {
-      translateText(rawTitle, lang, 'zh-CN').then((tr) => { if (active) setTransTitle(tr); });
-    }
-    if (rawDesc) {
-      translateText(rawDesc, lang, 'zh-CN').then((tr) => { if (active) setTransDesc(tr); });
-    }
-    return () => { active = false; };
-  }, [rawTitle, rawDesc, lang]);
-
-  const title = (lang !== 'zh-CN' && transTitle) ? transTitle : rawTitle;
-  const desc = (lang !== 'zh-CN' && transDesc) ? transDesc : rawDesc;
-
-  const eps = useMemo(() => {
-    const e = info?.episodes || [];
-    if (e.length) return e;
-    return s.firstVideoId ? [{ videoId: s.firstVideoId, episodeIndex: '1' }] : [];
-  }, [info, s.firstVideoId]);
-  const label = (ep, n) => `${t('ep', lang)} ${ep.episodeIndex ?? n + 1}`;
 
   function clearPending(ids) {
     setPending((p) => { const n = { ...p }; ids.forEach((i) => delete n[i]); return n; });
