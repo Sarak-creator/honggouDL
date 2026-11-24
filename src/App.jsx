@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import JSZip from 'jszip';
 import AdBanner from './AdBanner';
 import { LANGUAGES, GENRES, t, getGenre } from './i18n';
@@ -824,27 +824,16 @@ function Detail({ series, onClose, lang }) {
   const [geminiApiKey, setGeminiApiKey] = useState(() => localStorage.getItem('hg_gemini_api_key') || '');
   const [editingSubtitles, setEditingSubtitles] = useState([]);
   const fileInputRef = useRef(null);
+  const autoGenAttemptedRef = useRef(new Set());
 
   const currentVideoId = playing ? String(playing.ep.videoId) : null;
   const currentSubtitles = currentVideoId ? (subtitlesMap[currentVideoId] || []) : [];
 
-  // Auto-fetch cached subtitle when episode is opened
-  useEffect(() => {
-    if (!currentVideoId || subtitlesMap[currentVideoId]) return;
-    api(`/api/subtitles/${currentVideoId}`)
-      .then((res) => {
-        if (res.success && Array.isArray(res.subtitles) && res.subtitles.length > 0) {
-          setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: res.subtitles }));
-        }
-      })
-      .catch(() => {});
-  }, [currentVideoId]);
-
-  const handleGenerateSubtitles = async () => {
+  const handleGenerateSubtitles = useCallback(async (force = false) => {
     if (!playing || !currentVideoId) return;
-    const key = geminiApiKey || localStorage.getItem('hg_gemini_api_key');
+    const key = (geminiApiKey || localStorage.getItem('hg_gemini_api_key') || '').trim();
     if (!key) {
-      setApiKeyModalOpen(true);
+      if (force) setApiKeyModalOpen(true);
       return;
     }
 
@@ -859,16 +848,50 @@ function Detail({ series, onClose, lang }) {
         apiKey: key,
         seriesTitle: title,
         episodeNum: String(playing.ep.episodeIndex ?? epIndex + 1),
+        force: Boolean(force),
       });
       if (res.success && Array.isArray(res.subtitles)) {
         setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: res.subtitles }));
       }
     } catch (err) {
-      setError(`Subtitle error: ${err.message}`);
+      console.warn('Subtitle generation error:', err.message);
+      if (force) setError(`Subtitle error: ${err.message}`);
     } finally {
       setIsGeneratingSub(false);
     }
-  };
+  }, [playing, currentVideoId, geminiApiKey, eps, title]);
+
+  // Auto-fetch cached subtitle or auto-generate when episode is opened
+  useEffect(() => {
+    if (!currentVideoId) return;
+    if (subtitlesMap[currentVideoId] && subtitlesMap[currentVideoId].length > 0) return;
+
+    let isMounted = true;
+    api(`/api/subtitles/${currentVideoId}`)
+      .then((res) => {
+        if (!isMounted) return;
+        if (res.success && Array.isArray(res.subtitles) && res.subtitles.length > 0) {
+          setSubtitlesMap((prev) => ({ ...prev, [currentVideoId]: res.subtitles }));
+          return;
+        }
+        // If not in cache, auto-generate in background if API key exists
+        const key = (geminiApiKey || localStorage.getItem('hg_gemini_api_key') || '').trim();
+        if (key && playing && !autoGenAttemptedRef.current.has(currentVideoId)) {
+          autoGenAttemptedRef.current.add(currentVideoId);
+          handleGenerateSubtitles(false);
+        }
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        const key = (geminiApiKey || localStorage.getItem('hg_gemini_api_key') || '').trim();
+        if (key && playing && !autoGenAttemptedRef.current.has(currentVideoId)) {
+          autoGenAttemptedRef.current.add(currentVideoId);
+          handleGenerateSubtitles(false);
+        }
+      });
+
+    return () => { isMounted = false; };
+  }, [currentVideoId, geminiApiKey, playing, handleGenerateSubtitles]);
 
   const handleSrtUpload = (e) => {
     const file = e.target.files?.[0];
@@ -1424,8 +1447,17 @@ function Detail({ series, onClose, lang }) {
                   <strong>{t('subtitlesKhmer', lang)}:</strong>{' '}
                   {currentSubtitles.length > 0 ? (
                     <span className="sub-count-tag">{t('subtitlesCount', lang, { count: currentSubtitles.length })}</span>
+                  ) : isGeneratingSub ? (
+                    <span className="sub-none-tag" style={{ color: '#38bdf8', fontWeight: 600 }}>
+                      <span className="spin-icon" style={{ display: 'inline-block', marginRight: 4 }}>⏳</span>
+                      {t('autoGeneratingSubtitles', lang)}
+                    </span>
+                  ) : !geminiApiKey ? (
+                    <span className="sub-none-tag" style={{ color: '#f59e0b', cursor: 'pointer' }} onClick={() => setApiKeyModalOpen(true)}>
+                      ⚠️ {t('needApiKeyNotice', lang)}
+                    </span>
                   ) : (
-                    <span className="sub-none-tag">{isGeneratingSub ? t('generatingSubtitles', lang) : t('noSubtitles', lang)}</span>
+                    <span className="sub-none-tag">{t('noSubtitles', lang)}</span>
                   )}
                 </div>
               </div>
@@ -1433,15 +1465,6 @@ function Detail({ series, onClose, lang }) {
               <div className="sub-action-buttons">
                 {currentSubtitles.length === 0 ? (
                   <>
-                    <button
-                      type="button"
-                      className="btn-sub ai-gen"
-                      onClick={handleGenerateSubtitles}
-                      disabled={isGeneratingSub}
-                      title={t('generateSubtitles', lang)}
-                    >
-                      {isGeneratingSub ? '⏳ ' + t('generatingSubtitles', lang) : t('generateSubtitles', lang)}
-                    </button>
                     <label className="btn-sub upload" title={t('loadSrt', lang)}>
                       {t('loadSrt', lang)}
                       <input
@@ -1477,11 +1500,11 @@ function Detail({ series, onClose, lang }) {
                     <button
                       type="button"
                       className="btn-sub ai-gen mini-ai"
-                      onClick={handleGenerateSubtitles}
+                      onClick={() => handleGenerateSubtitles(true)}
                       disabled={isGeneratingSub}
-                      title="Re-generate with AI"
+                      title={t('regenerateSubtitles', lang)}
                     >
-                      🔄 AI
+                      {isGeneratingSub ? '⏳' : t('regenerateSubtitles', lang)}
                     </button>
                     <button
                       type="button"
@@ -1863,10 +1886,13 @@ function Detail({ series, onClose, lang }) {
                   type="button"
                   className="btn-sub ai-gen"
                   onClick={() => {
-                    localStorage.setItem('hg_gemini_api_key', geminiApiKey.trim());
+                    const trimmed = (geminiApiKey || '').trim();
+                    localStorage.setItem('hg_gemini_api_key', trimmed);
+                    setGeminiApiKey(trimmed);
                     setApiKeyModalOpen(false);
                     if (playing && currentSubtitles.length === 0) {
-                      handleGenerateSubtitles();
+                      autoGenAttemptedRef.current.add(currentVideoId);
+                      handleGenerateSubtitles(true);
                     }
                   }}
                 >

@@ -1499,6 +1499,7 @@ function extractAacFromTs(tsBuf, audioPid = 257) {
 
 async function extractAacFromHls(m3u8Url) {
   const r = await fetch(m3u8Url, {
+    signal: AbortSignal.timeout(8000),
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Referer': m3u8Url.includes('tjyyjk.cn') || m3u8Url.includes('huangguo') ? 'https://huangguoai.com/' : 'https://www.yeguodj.com/',
@@ -1518,7 +1519,7 @@ async function extractAacFromHls(m3u8Url) {
       const ivMatch = trimmed.match(/IV=0x([0-9a-fA-F]+)/i);
       if (uriMatch) {
         const keyUrl = new URL(uriMatch[1], m3u8Url).href;
-        const keyRes = await fetch(keyUrl);
+        const keyRes = await fetch(keyUrl, { signal: AbortSignal.timeout(6000) });
         if (keyRes.ok) keyBuf = Buffer.from(await keyRes.arrayBuffer());
       }
       if (ivMatch) ivBuf = Buffer.from(ivMatch[1], 'hex');
@@ -1531,14 +1532,14 @@ async function extractAacFromHls(m3u8Url) {
 
   let audioPid = null;
   const aacChunks = [];
-  const BATCH_SIZE = 8;
+  const BATCH_SIZE = 25;
 
   for (let i = 0; i < segments.length; i += BATCH_SIZE) {
     const batchUrls = segments.slice(i, i + BATCH_SIZE);
     const batchDecrypted = await Promise.all(batchUrls.map(async (segUrl, bIdx) => {
       const segIdx = i + bIdx;
       try {
-        const segRes = await fetch(segUrl);
+        const segRes = await fetch(segUrl, { signal: AbortSignal.timeout(8000) });
         if (!segRes.ok) return null;
         let buf = Buffer.from(await segRes.arrayBuffer());
         if (keyBuf) {
@@ -1720,7 +1721,9 @@ Return ONLY a valid JSON array of objects:
   // Dynamically fetch available models from Google AI Studio if possible
   let dynamicModels = [];
   try {
-    const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    const listRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, {
+      signal: AbortSignal.timeout(4000)
+    });
     if (listRes.ok) {
       const listData = await listRes.json();
       if (Array.isArray(listData.models)) {
@@ -1757,25 +1760,29 @@ Return ONLY a valid JSON array of objects:
   let rawJson = null;
   const modelErrors = [];
 
-  for (const model of modelsToTry) {
+  for (let idx = 0; idx < modelsToTry.length; idx++) {
+    const model = modelsToTry[idx];
+    const isLastModel = idx === modelsToTry.length - 1;
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(28000)
       });
       if (!resp.ok) {
         const errJson = await resp.json().catch(() => ({}));
         const errMsg = errJson.error?.message || resp.statusText;
-        // If temporary high-demand error, retry once after a short delay
-        if (resp.status === 503 || resp.status === 429 || errMsg.includes('high demand') || errMsg.includes('temporary')) {
-          console.warn(`[Subtitle AI] Model ${model} high demand (${errMsg}), retrying in 2s...`);
-          await new Promise((r) => setTimeout(r, 2000));
+        // If temporary high-demand and it is the last model available, retry once after 1.5s
+        if (isLastModel && (resp.status === 503 || resp.status === 429 || errMsg.includes('high demand') || errMsg.includes('temporary'))) {
+          console.warn(`[Subtitle AI] Final model ${model} high demand (${errMsg}), retrying once in 1.5s...`);
+          await new Promise((r) => setTimeout(r, 1500));
           const retryResp = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(28000)
           });
           if (retryResp.ok) {
             const data = await retryResp.json();
