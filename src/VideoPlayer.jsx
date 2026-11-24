@@ -26,7 +26,7 @@ export default function VideoPlayer({
       hlsRef.current = null;
     }
 
-    const isHls = /\.m3u8/i.test(src) || src.includes('yeguo') || src.includes('stream');
+    const isHls = /\.m3u8/i.test(src) || src.includes('yeguo') || src.includes('huangguo') || src.includes('stream');
 
     if (isHls && Hls.isSupported()) {
       const hls = new Hls({

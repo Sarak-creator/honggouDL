@@ -51,11 +51,11 @@ function findCover(o, depth = 0) {
   return null;
 }
 
-// Covers may be HEIC or AES-encrypted Yeguo images; the server proxy decrypts & converts them.
+// Covers may be HEIC or AES-encrypted Yeguo/Huangguo images; the server proxy decrypts & converts them.
 const variants = (src) => {
   const proxied = `/api/img?v=3&u=${encodeURIComponent(src)}`;
   const proxiedFresh = `/api/img?v=3&fresh=1&u=${encodeURIComponent(src)}`;
-  return /\.hei[cf]/i.test(src) || /biacea\.cn|yeguodj|ygdj/i.test(src)
+  return /\.hei[cf]/i.test(src) || /biacea\.cn|yeguodj|ygdj|qnlycc\.cn|eisees\.com|huangguo/i.test(src)
     ? [proxied, proxiedFresh]
     : [src, proxied, proxiedFresh];
 };
@@ -103,6 +103,20 @@ function normalize(item) {
       tags: Array.isArray(item.tags) ? item.tags : [],
       platform: 'yeguo',
       isYeguo: true,
+      isHuangguo: false,
+    };
+  }
+  if (item.platform === 'huangguo' || item.isHuangguo) {
+    return {
+      id: String(item.id || item.video_id),
+      title: item.title || 'Untitled',
+      cover: item.cover,
+      episodes: item.episodes || item.episode_count || 1,
+      desc: item.desc || item.description || '',
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      platform: 'huangguo',
+      isYeguo: false,
+      isHuangguo: true,
     };
   }
   const d = item.data || item;
@@ -116,6 +130,7 @@ function normalize(item) {
     tags: [...new Set(TAG_KEYS.flatMap((k) => toTags(dig(v, k))))].slice(0, 8),
     platform: 'hongguo',
     isYeguo: false,
+    isHuangguo: false,
   };
 }
 
@@ -128,6 +143,22 @@ function extractYeguoId(str) {
   if (prefixMatch) return prefixMatch[1];
   if (s.includes('yeguodj') && /\d+/.test(s)) {
     const m = s.match(/\d{3,10}/);
+    if (m) return m[0];
+  }
+  return null;
+}
+
+function extractHuangguoId(str) {
+  if (!str) return null;
+  const s = String(str).trim();
+  const urlMatch = s.match(/(?:huangguoai|hgai)\.(?:com|cn|cc|net)\/(?:video|detail|play)\/(\d+)/i);
+  if (urlMatch) return urlMatch[1];
+  const paramMatch = s.match(/[?&](?:video_id|id)=(\d+)/i);
+  if (s.includes('huangguo') && paramMatch) return paramMatch[1];
+  const prefixMatch = s.match(/(?:huangguo(?:ai)?)[ :#/_-]+(\d+)/i);
+  if (prefixMatch) return prefixMatch[1];
+  if (s.includes('huangguo') && /\d+/.test(s)) {
+    const m = s.match(/\d{2,10}/);
     if (m) return m[0];
   }
   return null;
@@ -194,6 +225,12 @@ export default function App() {
         const cards = toCards(items);
         setResults(cards);
         if (!cards.length) setError('No dramas returned from Yeguo.');
+      } else if (targetPlat === 'huangguo') {
+        const items = await api('/api/huangguo/home?limit=24&page=1');
+        setRaw(items[0] || null);
+        const cards = toCards(items);
+        setResults(cards);
+        if (!cards.length) setError('No dramas returned from Huangguo.');
       } else {
         const items = await api('/api/home?limit=200');
         setRaw(items[0] || null);
@@ -248,6 +285,16 @@ export default function App() {
           } else {
             setHasMoreServer(false);
           }
+        } else if (platform === 'huangguo') {
+          const nextPage = Math.floor(results.length / PAGE_SIZE) + 1;
+          const items = await api(`/api/huangguo/home?limit=${PAGE_SIZE}&page=${nextPage}`);
+          const cards = toCards(items);
+          if (cards.length) {
+            setResults((prev) => [...prev, ...cards]);
+            setVisibleCount((prev) => prev + PAGE_SIZE);
+          } else {
+            setHasMoreServer(false);
+          }
         } else {
           const nextLimit = results.length + PAGE_SIZE;
           const items = await api(`/api/home?limit=${nextLimit}`);
@@ -276,6 +323,12 @@ export default function App() {
         const cards = toCards(items);
         setResults(cards);
         if (!cards.length) setError('No results found for “' + q + '” on Yeguo.');
+      } else if (targetPlat === 'huangguo') {
+        const items = await api('/api/huangguo/search', { query: q, limit: 30 });
+        setRaw(items[0] || null);
+        const cards = toCards(items);
+        setResults(cards);
+        if (!cards.length) setError('No results found for “' + q + '” on Huangguo.');
       } else {
         const items = await api('/api/search', { query: q, maxPages: 3 });
         setRaw(items.find((i) => i.success !== false) || items[0] || null);
@@ -308,6 +361,22 @@ export default function App() {
       return;
     }
 
+    // Check if user entered a huangguoai.com link or ID
+    const huangguoId = extractHuangguoId(q);
+    if (huangguoId) {
+      if (platform !== 'huangguo') {
+        setPlatform('huangguo');
+        localStorage.setItem('hg_platform', 'huangguo');
+      }
+      setSelected({
+        id: huangguoId,
+        title: `Huangguo Drama ${huangguoId}`,
+        platform: 'huangguo',
+        isHuangguo: true,
+      });
+      return;
+    }
+
     // If currently on Yeguo and input is a pure numeric ID (e.g. 4183)
     if (platform === 'yeguo' && /^\d{1,10}$/.test(q)) {
       setSelected({
@@ -315,6 +384,17 @@ export default function App() {
         title: `Yeguo Drama ${q}`,
         platform: 'yeguo',
         isYeguo: true,
+      });
+      return;
+    }
+
+    // If currently on Huangguo and input is a pure numeric ID (e.g. 15733)
+    if (platform === 'huangguo' && /^\d{1,10}$/.test(q)) {
+      setSelected({
+        id: q,
+        title: `Huangguo Drama ${q}`,
+        platform: 'huangguo',
+        isHuangguo: true,
       });
       return;
     }
@@ -415,7 +495,13 @@ export default function App() {
             width="42"
             height="42"
           />
-          <h1>{platform === 'yeguo' ? (lang === 'zh-CN' ? '野果短剧下载器 (yeguodj.com)' : (lang === 'km' ? 'កម្មវិធីទាញយកវីដេអូរឿងភាគខ្លី Yeguo (yeguodj.com)' : 'Yeguo Drama Downloader (yeguodj.com)')) : t('appTitle', lang)}</h1>
+          <h1>
+            {platform === 'yeguo'
+              ? (lang === 'zh-CN' ? '野果短剧下载器 (yeguodj.com)' : (lang === 'km' ? 'កម្មវិធីទាញយកវីដេអូរឿងភាគខ្លី Yeguo (yeguodj.com)' : 'Yeguo Drama Downloader (yeguodj.com)'))
+              : platform === 'huangguo'
+              ? (lang === 'zh-CN' ? '黄果短剧下载器 (huangguoai.com)' : (lang === 'km' ? 'កម្មវិធីទាញយកវីដេអូរឿងភាគខ្លី Huangguo (huangguoai.com)' : 'Huangguo AI Drama Downloader (huangguoai.com)'))
+              : t('appTitle', lang)}
+          </h1>
         </div>
         <div className="top-actions">
           <div className="lang-flags" role="group" aria-label="Language selection">
@@ -482,6 +568,17 @@ export default function App() {
           <span>{t('platformYeguo', lang)}</span>
           <span className="platform-pill">Direct</span>
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={platform === 'huangguo'}
+          className={`platform-tab ${platform === 'huangguo' ? 'active' : ''}`}
+          onClick={() => switchPlatform('huangguo')}
+        >
+          <span>🥭</span>
+          <span>{t('platformHuangguo', lang)}</span>
+          <span className="platform-pill">Direct</span>
+        </button>
       </div>
 
       <form onSubmit={search} className="search-box-wrapper">
@@ -495,7 +592,13 @@ export default function App() {
           className="search-input"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={platform === 'yeguo' ? t('searchPlaceholderYeguo', lang) : t('searchPlaceholder', lang)}
+          placeholder={
+            platform === 'yeguo'
+              ? t('searchPlaceholderYeguo', lang)
+              : platform === 'huangguo'
+              ? t('searchPlaceholderHuangguo', lang)
+              : t('searchPlaceholder', lang)
+          }
         />
         {query && (
           <button
@@ -576,6 +679,8 @@ export default function App() {
         {mode === 'home' ? `${t('allDramas', lang)} (${filteredResults.length})` : `${t('resultsFor', lang)} “${query}” (${filteredResults.length})`}
         {platform === 'yeguo' ? (
           <span className="yeguo-badge">🍇 yeguodj.com · Direct</span>
+        ) : platform === 'huangguo' ? (
+          <span className="yeguo-badge" style={{ background: '#d97706', color: '#fff' }}>🥭 huangguoai.com · Direct</span>
         ) : apifyStatus?.standalone ? (
           <span className="cached-badge" style={{ backgroundColor: '#059669', color: '#fff', marginLeft: '8px' }}>
             ⚡ Standalone Database
@@ -674,7 +779,12 @@ function Detail({ series, onClose, lang }) {
 
   useEffect(() => {
     const isYeguo = series.platform === 'yeguo' || series.isYeguo;
-    const detailUrl = isYeguo ? `/api/yeguo/series/${series.id}` : `/api/series/${series.id}`;
+    const isHuangguo = series.platform === 'huangguo' || series.isHuangguo;
+    const detailUrl = isYeguo
+      ? `/api/yeguo/series/${series.id}`
+      : isHuangguo
+      ? `/api/huangguo/series/${series.id}`
+      : `/api/series/${series.id}`;
 
     api(detailUrl)
       .then((r) => {
@@ -685,7 +795,7 @@ function Detail({ series, onClose, lang }) {
             : row?.error || 'Could not load series details.');
         else {
           setInfo(row);
-          if (row.platform === 'yeguo' || row.isYeguo || isYeguo) {
+          if (row.platform === 'yeguo' || row.isYeguo || isYeguo || row.platform === 'huangguo' || row.isHuangguo || isHuangguo) {
             const initReady = {};
             (row.episodes || []).forEach((ep) => {
               if (ep.videoUrl || ep.downloadUrl) {
@@ -694,7 +804,7 @@ function Detail({ series, onClose, lang }) {
                   videoUrl: ep.videoUrl,
                   downloadUrl: ep.downloadUrl,
                   playUrl: ep.playUrl,
-                  definition: ep.definition || '720p',
+                  definition: ep.definition || '1080p',
                   codec: ep.codec || 'H.264',
                   success: true,
                 };
@@ -709,7 +819,7 @@ function Detail({ series, onClose, lang }) {
       cancelDownloadRef.current = true;
       timers.current.forEach(clearInterval);
     };
-  }, [series.id, series.platform, series.isYeguo, lang]);
+  }, [series.id, series.platform, series.isYeguo, series.isHuangguo, lang]);
 
   const s = info?.series || {};
   const rawTitle = s.title || series.title;
@@ -748,6 +858,45 @@ function Detail({ series, onClose, lang }) {
     setError('');
     setFailed((f) => { const n = { ...f }; ids.forEach((i) => delete n[i]); return n; });
     setPending((p) => ({ ...p, ...Object.fromEntries(ids.map((i) => [i, true])) }));
+
+    const isHuangguo = series.platform === 'huangguo' || series.isHuangguo || info?.isHuangguo;
+    if (isHuangguo) {
+      const promises = ids.map(async (id) => {
+        try {
+          const ep = eps.find((e) => String(e.videoId) === String(id));
+          const epNum = ep?.episodeIndex || id.replace(/^.*_/, '');
+          const res = await api(`/api/huangguo/play?videoId=${series.id}&episodeId=${epNum}`);
+          if (res?.videoUrl) {
+            const safeTitle = `${title} Ep ${epNum}`;
+            return {
+              id,
+              data: {
+                videoId: id,
+                videoUrl: res.videoUrl,
+                playUrl: res.videoUrl,
+                downloadUrl: `/api/huangguo/stream?videoId=${series.id}&episodeId=${epNum}&download=1&name=${encodeURIComponent(safeTitle)}&url=${encodeURIComponent(res.videoUrl)}`,
+                definition: '1080p',
+                codec: 'H.264',
+                success: true,
+              }
+            };
+          }
+          return { id, error: 'No stream available' };
+        } catch (e) {
+          return { id, error: e.message };
+        }
+      });
+      const results = await Promise.all(promises);
+      const ok = {}, bad = {};
+      results.forEach((r) => {
+        if (r.data) ok[r.id] = r.data;
+        else bad[r.id] = r.error || 'failed';
+      });
+      setReady((prev) => ({ ...prev, ...ok }));
+      setFailed((prev) => ({ ...prev, ...bad }));
+      clearPending(ids);
+      return;
+    }
 
     const chunkSize = 80;
     for (let i = 0; i < ids.length; i += chunkSize) {
@@ -791,8 +940,11 @@ function Detail({ series, onClose, lang }) {
   function prepareMany(ids) {
     const n = ids.filter((id) => !ready[id] && !pending[id]).length;
     if (!n) return;
-    const cost = (n * 0.0035).toFixed(2);
-    if (n > 5 && !window.confirm(t('confirmPrepare', lang, { count: n, cost }))) return;
+    const isDirect = series.isYeguo || series.isHuangguo || info?.isYeguo || info?.isHuangguo;
+    if (!isDirect && n > 5) {
+      const cost = (n * 0.0035).toFixed(2);
+      if (!window.confirm(t('confirmPrepare', lang, { count: n, cost }))) return;
+    }
     prepare(ids);
   }
 
@@ -874,8 +1026,8 @@ function Detail({ series, onClose, lang }) {
       if (item && item.videoUrl) {
         setStatusMessage(t('downloadingEp', lang, { ep: epLabel }));
         const fileName = `${title} ${epLabel}`.replace(/[\\/:*?"<>|]/g, '_').trim();
-        const isYeguoHls = item.isYeguo || ep.isYeguo || series.isYeguo || item.videoUrl.includes('.m3u8');
-        if (isYeguoHls) {
+        const isHls = item?.isYeguo || ep?.isYeguo || series.isYeguo || item?.isHuangguo || ep?.isHuangguo || series.isHuangguo || item?.videoUrl?.includes('.m3u8');
+        if (isHls) {
           try {
             setDownloadingEps((prev) => ({ ...prev, [id]: { percent: 0, speed: '0.0' } }));
             const blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
@@ -999,10 +1151,10 @@ function Detail({ series, onClose, lang }) {
           if (cancelDownloadRef.current || !item?.videoUrl) continue;
 
           setDownloadingEps((prev) => ({ ...prev, [id]: { percent: 0, speed: '0.0' } }));
-          const isYeguoHls = item.isYeguo || ep.isYeguo || series.isYeguo || item.videoUrl.includes('.m3u8');
+          const isHls = item?.isYeguo || ep?.isYeguo || series.isYeguo || item?.isHuangguo || ep?.isHuangguo || series.isHuangguo || item?.videoUrl?.includes('.m3u8');
           let blob;
           try {
-            if (isYeguoHls) {
+            if (isHls) {
               blob = await fetchAndDecryptHls(item.videoUrl, (p) => {
                 setDownloadingEps((prev) => ({ ...prev, [id]: { percent: p.percent, speed: p.speedMBs } }));
                 setStatusMessage(
@@ -1073,8 +1225,8 @@ function Detail({ series, onClose, lang }) {
   };
 
   const handleSingleEpisodeDownload = async (e, ep, item, idx) => {
-    const isYeguoHls = item?.isYeguo || ep?.isYeguo || series.isYeguo || item?.videoUrl?.includes('.m3u8');
-    if (!isYeguoHls) return;
+    const isHls = item?.isYeguo || ep?.isYeguo || series.isYeguo || item?.isHuangguo || ep?.isHuangguo || series.isHuangguo || item?.videoUrl?.includes('.m3u8');
+    if (!isHls) return;
     e.preventDefault();
     const epIndex = idx >= 0 ? idx : eps.indexOf(ep);
     const epLabel = label(ep, epIndex);

@@ -901,7 +901,7 @@ async function streamDecryptedHls(m3u8Url, res, fileName, isDownload) {
     const r = await fetch(m3u8Url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://www.yeguodj.com/',
+        'Referer': m3u8Url.includes('tjyyjk.cn') || m3u8Url.includes('huangguo') ? 'https://huangguoai.com/' : 'https://www.yeguodj.com/',
       }
     });
     if (!r.ok) {
@@ -1080,6 +1080,291 @@ app.get('/api/yeguo/stream', async (req, res) => {
     ffmpegProc.stdout.pipe(res);
   } catch (err) {
     console.warn('[Stream Route Error]', err.message);
+    if (!res.headersSent) res.status(500).send(err.message);
+  }
+});
+
+// ---- Huangguo (huangguoai.com) Downloader & Streaming Engine -----------
+app.get('/api/huangguo/home', wrap(async ({ query }) => {
+  const page = Math.max(1, +query.page || 1);
+  const limit = Math.min(100, Math.max(1, +query.limit || 24));
+  const res = await fetch(`https://huangguoai.com/api/home/latest?page=${page}&size=${limit}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://huangguoai.com/'
+    }
+  });
+  if (!res.ok) throw new Error(`Huangguo Home API error ${res.status}`);
+  const json = await res.json();
+  const rawItems = json?.data?.items || json?.data?.content || [];
+  const items = rawItems.map((item) => {
+    let cover = item.cover || '';
+    if (cover && !cover.startsWith('http')) {
+      cover = `https://pic.qnlycc.cn${cover.startsWith('/') ? '' : '/'}${cover}`;
+    }
+    return {
+      id: String(item.id),
+      title: item.title || 'Untitled',
+      cover,
+      episodes: item.episode_count || 1,
+      desc: item.desc || item.description || '',
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      platform: 'huangguo',
+      isHuangguo: true,
+    };
+  });
+  return items;
+}));
+
+app.post('/api/huangguo/search', wrap(async ({ body }) => {
+  const q = String(body.query || '').trim();
+  if (!q) throw new Error('Empty query');
+  const page = Math.max(1, +body.page || 1);
+  const limit = Math.min(100, Math.max(1, +body.limit || 24));
+
+  let rawItems = [];
+  try {
+    const res = await fetch(`https://huangguoai.com/api/search?q=${encodeURIComponent(q)}&page=${page}&size=${limit}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://huangguoai.com/'
+      }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      rawItems = json?.data?.items || [];
+    }
+  } catch (err) {
+    console.warn('[Huangguo Search Error]', err.message);
+  }
+
+  if (!rawItems.length) {
+    try {
+      const sRes = await fetch(`https://huangguoai.com/api/search/suggest?type=video&q=${encodeURIComponent(q)}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': 'https://huangguoai.com/'
+        }
+      });
+      if (sRes.ok) {
+        const sJson = await sRes.json();
+        rawItems = sJson?.data?.content || [];
+      }
+    } catch (err) {
+      console.warn('[Huangguo Search Suggest Error]', err.message);
+    }
+  }
+
+  const items = rawItems.map((item) => {
+    let cover = item.cover || '';
+    if (cover && !cover.startsWith('http')) {
+      cover = `https://pic.qnlycc.cn${cover.startsWith('/') ? '' : '/'}${cover}`;
+    }
+    return {
+      id: String(item.id),
+      title: item.title || 'Untitled',
+      cover,
+      episodes: item.episode_count || 1,
+      desc: item.desc || item.description || '',
+      tags: Array.isArray(item.tags) ? item.tags : [],
+      platform: 'huangguo',
+      isHuangguo: true,
+    };
+  });
+  return items;
+}));
+
+app.get('/api/huangguo/series/:id', wrap(async ({ params }) => {
+  const videoId = String(params.id).trim();
+  if (!/^\d+$/.test(videoId)) throw new Error('Invalid Huangguo series id');
+
+  const res = await fetch(`https://huangguoai.com/api/videos/${videoId}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://huangguoai.com/'
+    }
+  });
+  if (!res.ok) throw new Error(`Huangguo video detail upstream error ${res.status}`);
+  const json = await res.json();
+  const detail = json?.data;
+  if (!detail || !detail.title) throw new Error('Huangguo drama not found');
+
+  let cover = detail.cover || '';
+  if (cover && !cover.startsWith('http')) {
+    cover = `https://pic.qnlycc.cn${cover.startsWith('/') ? '' : '/'}${cover}`;
+  }
+  const dramaTitle = detail.title || `Huangguo Drama ${videoId}`;
+  const dramaDesc = detail.description || '';
+  const rawEpisodes = detail.episodes || [];
+
+  // Pre-fetch playback streams for small series or up to 8 episodes in parallel
+  const prefetchCount = Math.min(rawEpisodes.length, 8);
+  const streamMap = new Map();
+  if (prefetchCount > 0) {
+    const prefetchPromises = rawEpisodes.slice(0, prefetchCount).map(async (ep) => {
+      try {
+        const pRes = await fetch(`https://huangguoai.com/api/videos/${videoId}/episodes/${ep.ep_num}/playback`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://huangguoai.com/'
+          },
+          body: JSON.stringify({})
+        });
+        if (pRes.ok) {
+          const pJson = await pRes.json();
+          const m3u8 = pJson?.data?.streams?.main || '';
+          if (m3u8) streamMap.set(ep.ep_num, m3u8);
+        }
+      } catch {}
+    });
+    await Promise.all(prefetchPromises);
+  }
+
+  const mappedEpisodes = rawEpisodes.map((ep, idx) => {
+    const epNum = ep.ep_num ?? (idx + 1);
+    const epId = `${videoId}_${epNum}`;
+    const epTitle = ep.title || `${dramaTitle} 第${epNum}集`;
+    const vUrl = streamMap.get(epNum) || '';
+    const safeTitle = `${dramaTitle} Ep ${epNum}`;
+    return {
+      videoId: epId,
+      episodeIndex: String(epNum),
+      title: epTitle,
+      duration: ep.duration || 0,
+      videoUrl: vUrl,
+      playUrl: vUrl || `/api/huangguo/stream?videoId=${videoId}&episodeId=${epNum}`,
+      downloadUrl: `/api/huangguo/stream?videoId=${videoId}&episodeId=${epNum}&download=1&name=${encodeURIComponent(safeTitle)}${vUrl ? `&url=${encodeURIComponent(vUrl)}` : ''}`,
+      isHuangguo: true,
+      platform: 'huangguo',
+      definition: '1080p',
+      codec: 'H.264',
+    };
+  });
+
+  return [{
+    success: true,
+    seriesId: videoId,
+    platform: 'huangguo',
+    isHuangguo: true,
+    series: {
+      seriesId: videoId,
+      title: dramaTitle,
+      synopsis: dramaDesc,
+      coverUrl: cover,
+      episodeCount: detail.episode_count || mappedEpisodes.length,
+      tags: detail.tags || [],
+    },
+    episodes: mappedEpisodes,
+  }];
+}));
+
+// Fetch fresh stream url for a single episode on demand
+app.get('/api/huangguo/play', wrap(async ({ query }) => {
+  const videoId = String(query.videoId || '').replace(/_\d+$/, '');
+  const episodeId = String(query.episodeId || '1').replace(/^.*_/, '');
+  if (!videoId) throw new Error('Missing videoId');
+
+  const pRes = await fetch(`https://huangguoai.com/api/videos/${videoId}/episodes/${episodeId}/playback`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://huangguoai.com/'
+    },
+    body: JSON.stringify({})
+  });
+  if (!pRes.ok) throw new Error(`Huangguo Playback upstream error ${pRes.status}`);
+  const pJson = await pRes.json();
+  const videoUrl = pJson?.data?.streams?.main || '';
+  return {
+    success: true,
+    videoId: `${videoId}_${episodeId}`,
+    episodeId,
+    videoUrl,
+  };
+}));
+
+// Remuxing & fallback streaming endpoint for Huangguo
+app.get('/api/huangguo/stream', async (req, res) => {
+  try {
+    let rawUrl = String(req.query.url || '');
+    let videoId = String(req.query.videoId || '').replace(/_\d+$/, '');
+    let episodeId = String(req.query.episodeId || '1').replace(/^.*_/, '');
+
+    if ((!rawUrl || rawUrl === 'undefined') && videoId && episodeId) {
+      try {
+        const pRes = await fetch(`https://huangguoai.com/api/videos/${videoId}/episodes/${episodeId}/playback`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://huangguoai.com/'
+          },
+          body: JSON.stringify({})
+        });
+        if (pRes.ok) {
+          const pJson = await pRes.json();
+          rawUrl = pJson?.data?.streams?.main || '';
+        }
+      } catch (e) {
+        console.warn(`[Huangguo Auto-refresh URL Error] ${e.message}`);
+      }
+    }
+
+    if (!rawUrl) return res.status(400).send('Missing video url');
+
+    const isDownload = req.query.download === '1' || req.query.download === 'true';
+    const fileName = String(req.query.name || 'huangguo_video').replace(/[\\/:*?"<>|]/g, '_').slice(0, 100);
+
+    if (!hasFfmpeg) {
+      return await streamDecryptedHls(rawUrl, res, fileName, isDownload);
+    }
+
+    const headers = [
+      'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer: https://huangguoai.com/'
+    ].join('\r\n') + '\r\n';
+
+    res.set({
+      'Content-Type': 'video/mp4',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': '*',
+    });
+
+    if (isDownload) {
+      res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}.mp4"; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
+    } else {
+      res.set('Content-Disposition', `inline; filename="${encodeURIComponent(fileName)}.mp4"; filename*=UTF-8''${encodeURIComponent(fileName)}.mp4`);
+    }
+
+    const ffmpegArgs = [
+      '-headers', headers,
+      '-reconnect', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
+      '-i', rawUrl,
+      '-c', 'copy',
+      '-bsf:a', 'aac_adtstoasc',
+      '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+      '-f', 'mp4',
+      'pipe:1'
+    ];
+
+    const ffmpegProc = spawn(FFMPEG_BIN, ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+    req.on('close', () => {
+      try {
+        if (!ffmpegProc.killed) ffmpegProc.kill();
+      } catch {}
+    });
+    ffmpegProc.on('error', (err) => {
+      if (!res.headersSent) res.status(500).send('FFmpeg process error: ' + err.message);
+    });
+    ffmpegProc.stdout.pipe(res);
+  } catch (err) {
+    console.warn('[Huangguo Stream Route Error]', err.message);
     if (!res.headersSent) res.status(500).send(err.message);
   }
 });

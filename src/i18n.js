@@ -97,6 +97,10 @@ export const TRANSLATIONS = {
     searchPlaceholderYeguo: 'ដាក់តំណភ្ជាប់ yeguodj.com ឬស្វែងរកចំណងជើង (ឧ. https://yeguodj.com/drama/detail/4183/)',
     yeguoDirectNotice: '⚡ វីដេអូបានត្រៀមរួចរាល់សម្រាប់ការទាញយកភ្លាមៗ (yeguodj.com)',
     yeguoTag: '野果 Yeguo',
+    platformHuangguo: 'Huangguo (黄果短剧)',
+    searchPlaceholderHuangguo: 'ដាក់តំណភ្ជាប់ huangguoai.com ឬស្វែងរកចំណងជើង (ឧ. https://huangguoai.com/video/15733)',
+    huangguoDirectNotice: '⚡ វីដេអូបានត្រៀមរួចរាល់សម្រាប់ការទាញយកភ្លាមៗ (huangguoai.com)',
+    huangguoTag: '黄果 Huangguo',
   },
   en: {
     appTitle: 'Hongguo Drama Video Downloader',
@@ -171,6 +175,10 @@ export const TRANSLATIONS = {
     searchPlaceholderYeguo: 'Paste yeguodj.com link or search titles (e.g. https://yeguodj.com/drama/detail/4183/)',
     yeguoDirectNotice: '⚡ Direct download ready (yeguodj.com - no Apify limits)',
     yeguoTag: 'Yeguo',
+    platformHuangguo: 'Huangguo AI (huangguoai.com)',
+    searchPlaceholderHuangguo: 'Paste huangguoai.com link or search titles (e.g. https://huangguoai.com/video/15733)',
+    huangguoDirectNotice: '⚡ Direct download ready (huangguoai.com - no Apify limits)',
+    huangguoTag: 'Huangguo AI',
   },
   'zh-CN': {
     appTitle: '红果短剧视频下载器',
@@ -245,6 +253,10 @@ export const TRANSLATIONS = {
     searchPlaceholderYeguo: '粘贴 yeguodj.com 链接或搜索短剧标题（例如 https://yeguodj.com/drama/detail/4183/）',
     yeguoDirectNotice: '⚡ 直链即刻下载（野果短剧 yeguodj.com，无 Apify 配额限制）',
     yeguoTag: '野果短剧',
+    platformHuangguo: '黄果短剧 (huangguoai.com)',
+    searchPlaceholderHuangguo: '粘贴 huangguoai.com 链接或搜索短剧标题（例如 https://huangguoai.com/video/15733）',
+    huangguoDirectNotice: '⚡ 直链即刻下载（黄果短剧 huangguoai.com，无 Apify 配额限制）',
+    huangguoTag: '黄果短剧',
   }
 };
 
